@@ -5,7 +5,7 @@
 #include "Config.h"
 
 // 最大动作数
-#define MAX_ACTIONS 5000
+#define MAX_ACTIONS 7000
 
 // 舵机ID的特殊值，表示这是一个复位命令
 #define RESET_ACTION_ID 0xFF
