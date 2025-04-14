@@ -18,6 +18,7 @@ struct ServoCommand {
 // 函数声明 - 保留所有函数，它们都在使用中
 void initServo();
 int calculateMoveTime(int distance);
+int calculateAutoResetTime(); // 添加自动计算复位时间的函数
 int getServoIndex(int servoId);
 void moveServo(int servoId, int position);
 void resetServos();

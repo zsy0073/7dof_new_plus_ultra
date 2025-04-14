@@ -99,16 +99,12 @@ void moveServo(int servoId, int position) {
 void resetServos() {
   Serial.println("复位所有舵机到中心位置");
   
-  // 找出距离中心最远的舵机，计算最长的移动时间
-  int maxDistance = 0;
-  for (int i = 0; i < 7; i++) {
-    int distance = abs(CENTER_POSITION - servoStates[i].currentPos);
-    maxDistance = max(maxDistance, distance);
-  }
-  int distance = abs(CENTER_POSITION - servoStates[7].currentPos);
-  maxDistance = max(maxDistance, distance);
+  // 使用自动计算的复位时间
+  int moveTime = calculateAutoResetTime();
   
-  int moveTime = calculateMoveTime(maxDistance);
+  Serial.print("使用自动复位时间: ");
+  Serial.print(moveTime);
+  Serial.println("ms");
   
   // 同时移动所有舵机到中心位置
   for (int i = 0; i < 7; i++) {
@@ -134,6 +130,62 @@ void resetServos() {
     // 使用特殊ID表示这是一个复位命令
     recordAction(RESET_ACTION_ID, 0, moveTime);
   }
+}
+
+// 自动计算适合的复位时间
+int calculateAutoResetTime() {
+  int maxDistance = 0;
+  int totalDistance = 0;
+  int activeServoCount = 0;
+  
+  // 计算所有舵机到中心位置的最大距离和总距离
+  for (int i = 0; i < 7; i++) {
+    int distance = abs(CENTER_POSITION - servoStates[i].currentPos);
+    if (distance > POSITION_DEADZONE) {
+      maxDistance = max(maxDistance, distance);
+      totalDistance += distance;
+      activeServoCount++;
+    }
+  }
+  
+  // 计算夹持器到中心的距离
+  int gripperDistance = abs(CENTER_POSITION - servoStates[7].currentPos);
+  if (gripperDistance > POSITION_DEADZONE) {
+    maxDistance = max(maxDistance, gripperDistance);
+    totalDistance += gripperDistance;
+    activeServoCount++;
+  }
+  
+  // 如果没有舵机需要移动，返回最小时间
+  if (activeServoCount == 0) {
+    return AUTO_RESET_TIME_MIN;
+  }
+  
+  // 计算平均距离
+  int avgDistance = totalDistance / activeServoCount;
+  
+  // 基于最大距离和平均距离动态调整复位时间
+  int resetTime;
+  
+  if (maxDistance > RESET_DISTANCE_THRESHOLD) {
+    // 对于大距离移动，使用更长的时间以确保平稳
+    resetTime = AUTO_RESET_TIME_MIN + (maxDistance * RESET_TIME_FACTOR);
+  } else {
+    // 对于小距离移动，使用更快的复位时间
+    resetTime = AUTO_RESET_TIME_MIN + (avgDistance * 1.2);
+  }
+  
+  // 确保复位时间在合理范围内
+  resetTime = constrain(resetTime, AUTO_RESET_TIME_MIN, AUTO_RESET_TIME_MAX);
+  
+  Serial.print("自动复位时间: ");
+  Serial.print(resetTime);
+  Serial.print("ms, 最大距离: ");
+  Serial.print(maxDistance);
+  Serial.print(", 平均距离: ");
+  Serial.println(avgDistance);
+  
+  return resetTime;
 }
 
 // 处理舵机控制 - 现在支持在录制模式下使用手柄控制

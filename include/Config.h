@@ -22,6 +22,12 @@ extern const int gripperServo;
 #define MIN_MOVE_TIME 100       // 最小移动时间(毫秒)
 #define MAX_MOVE_TIME 1000      // 最大移动时间(毫秒)
 
+// 自动复位时间调整参数
+#define AUTO_RESET_TIME_MIN 1500      // 最小复位时间(毫秒)
+#define AUTO_RESET_TIME_MAX 3000     // 最大复位时间(毫秒) 
+#define RESET_TIME_FACTOR 1.5        // 复位时间调整因子
+#define RESET_DISTANCE_THRESHOLD 200 // 距离阈值，大于此值使用较长时间
+
 // 舵机平滑移动参数
 #define MOVE_STEP_TIME 50       // 每步默认移动时间(毫秒)
 #define POSITION_DEADZONE 5     // 位置死区(忽略小变化)
