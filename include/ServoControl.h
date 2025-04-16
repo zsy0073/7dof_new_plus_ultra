@@ -28,4 +28,7 @@ void moveServo(int servoId, int position);
 void resetServos();
 void handleServoControl(int servoId, int position);
 
+// 批量控制多个舵机函数声明
+void moveMultipleServos(LobotServo servoArray[], int servoCount, int moveTime);
+
 #endif  // SERVO_CONTROL_H

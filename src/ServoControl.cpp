@@ -36,18 +36,25 @@ void initServo() {
   Serial.println("初始化舵机控制...");
   Serial2.begin(9600, SERIAL_8N1, SERVO_SERIAL_RX_PIN, SERVO_SERIAL_TX_PIN);  // 舵机控制
   
-  // 初始化所有舵机到中心位置
+  // 创建舵机批量控制数组
+  LobotServo servoArray[8]; // 7个关节 + 1个夹持器
+  
+  // 设置所有舵机到中心位置
   for (int i = 0; i < 7; i++) {
-    servos.moveServo(jointServos[i], CENTER_POSITION, SERVO_MOVE_TIME);
+    servoArray[i].ID = jointServos[i];
+    servoArray[i].Position = CENTER_POSITION;
     servoStates[i].currentPos = CENTER_POSITION;
-    delay(20); // 短暂延时确保命令发送，减少延时时间
   }
   
-  // 初始化夹持器
-  servos.moveServo(gripperServo, CENTER_POSITION, SERVO_MOVE_TIME);
+  // 设置夹持器到中心位置
+  servoArray[7].ID = gripperServo;
+  servoArray[7].Position = CENTER_POSITION;
   servoStates[7].currentPos = CENTER_POSITION;
   
-  Serial.println("所有舵机已初始化到中心位置");
+  // 批量发送命令 - 同时控制所有舵机
+  servos.moveServos(servoArray, 8, SERVO_MOVE_TIME);
+  
+  Serial.println("所有舵机已同时初始化到中心位置");
 }
 
 // 简化版根据移动距离计算移动时间
@@ -123,17 +130,25 @@ void resetServos() {
   Serial.print(moveTime);
   Serial.println("ms");
   
-  // 同时移动所有舵机到中心位置
+  // 创建舵机批量控制数组
+  LobotServo servoArray[8]; // 7个关节 + 1个夹持器
+  
+  // 设置所有舵机到中心位置
   for (int i = 0; i < 7; i++) {
-    servos.moveServo(jointServos[i], CENTER_POSITION, moveTime);
+    servoArray[i].ID = jointServos[i];
+    servoArray[i].Position = CENTER_POSITION;
     servoStates[i].currentPos = CENTER_POSITION;
     armStatus.joints[i] = CENTER_POSITION;
   }
   
-  // 移动夹持器
-  servos.moveServo(gripperServo, CENTER_POSITION, moveTime);
+  // 设置夹持器到中心位置
+  servoArray[7].ID = gripperServo;
+  servoArray[7].Position = CENTER_POSITION;
   servoStates[7].currentPos = CENTER_POSITION;
   armStatus.gripper = CENTER_POSITION;
+  
+  // 批量发送命令 - 同时控制所有舵机
+  servos.moveServos(servoArray, 8, moveTime);
   
   // 更新最后一次舵机移动预计完成的时间
   // 添加额外的100ms缓冲，确保复位完全执行
@@ -235,6 +250,46 @@ void handleServoControl(int servoId, int position) {
   
   // 注意：moveServo函数内部已经处理了动作组记录
   // 不需要在这里再次调用recordAction
+}
+
+// 添加批量控制多个舵机的功能
+void moveMultipleServos(LobotServo servoArray[], int servoCount, int moveTime) {
+  // 批量发送命令 - 同时控制多个舵机
+  servos.moveServos(servoArray, servoCount, moveTime);
+  
+  // 更新舵机状态
+  for (int i = 0; i < servoCount; i++) {
+    int index = getServoIndex(servoArray[i].ID);
+    if (index >= 0) {
+      servoStates[index].currentPos = servoArray[i].Position;
+      
+      // 更新全局状态
+      if (servoArray[i].ID == gripperServo) {
+        armStatus.gripper = servoArray[i].Position;
+      } else if (index >= 0 && index < 7) {
+        armStatus.joints[index] = servoArray[i].Position;
+      }
+    }
+  }
+  
+  // 更新最后一次舵机移动预计完成的时间
+  servoLastMoveEndTime = millis() + moveTime;
+  
+  // 标记为已更新
+  armStatus.updated = true;
+  armStatus.lastCommandTime = millis();
+  
+  // 如果正在记录动作组，则记录这些舵机的移动
+  if (isRecording) {
+    for (int i = 0; i < servoCount; i++) {
+      recordAction(servoArray[i].ID, servoArray[i].Position, moveTime);
+    }
+  }
+  
+  Serial.print("批量控制 ");
+  Serial.print(servoCount);
+  Serial.print(" 个舵机，时间：");
+  Serial.println(moveTime);
 }
 
 // 移除updateServoStatus函数，简化控制流程
