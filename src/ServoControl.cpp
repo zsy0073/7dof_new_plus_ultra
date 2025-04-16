@@ -14,6 +14,23 @@ const int gripperServo = 8;
 // 记录最后一次舵机移动预计完成的时间
 unsigned long servoLastMoveEndTime = 0;
 
+// 角度转换辅助函数 - 用于240度舵机
+// 将角度值(0-240度)转换为舵机控制值(0-1000)
+int angleToPulse(float angle) {
+  // 约束角度范围
+  angle = constrain(angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+  // 线性映射：角度范围(0-240) -> 控制值范围(0-1000)
+  return map(angle * 10, SERVO_MIN_ANGLE * 10, SERVO_MAX_ANGLE * 10, 0, 1000);
+}
+
+// 将舵机控制值(0-1000)转换为角度值(0-240度)
+float pulseToAngle(int pulse) {
+  // 约束脉冲范围
+  pulse = constrain(pulse, 0, 1000);
+  // 线性映射：控制值范围(0-1000) -> 角度范围(0-240)
+  return map(pulse * 10, 0, 1000 * 10, SERVO_MIN_ANGLE * 10, SERVO_MAX_ANGLE * 10) / 10.0;
+}
+
 // 初始化舵机
 void initServo() {
   Serial.println("初始化舵机控制...");

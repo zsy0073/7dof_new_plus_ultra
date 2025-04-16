@@ -22,6 +22,12 @@ extern const int gripperServo;
 #define MIN_MOVE_TIME 100       // 最小移动时间(毫秒)
 #define MAX_MOVE_TIME 1000      // 最大移动时间(毫秒)
 
+// 舵机类型和角度范围定义
+#define SERVO_TYPE_240_DEGREE   // 使用240度舵机
+#define SERVO_MIN_ANGLE 0       // 舵机最小角度(度)
+#define SERVO_MAX_ANGLE 240     // 舵机最大角度(度)
+// 值映射说明：0 → 0度, 500 → 120度, 1000 → 240度
+
 // 自动复位时间调整参数
 #define AUTO_RESET_TIME_MIN 1500      // 最小复位时间(毫秒)
 #define AUTO_RESET_TIME_MAX 3000     // 最大复位时间(毫秒) 

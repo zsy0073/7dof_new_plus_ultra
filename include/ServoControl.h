@@ -15,6 +15,10 @@ struct ServoCommand {
   bool isReset;
 };
 
+// 角度转换函数 - 用于240度舵机
+int angleToPulse(float angle);
+float pulseToAngle(int pulse);
+
 // 函数声明 - 保留所有函数，它们都在使用中
 void initServo();
 int calculateMoveTime(int distance);
@@ -24,4 +28,4 @@ void moveServo(int servoId, int position);
 void resetServos();
 void handleServoControl(int servoId, int position);
 
-#endif // SERVO_CONTROL_H
+#endif  // SERVO_CONTROL_H
