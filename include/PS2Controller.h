@@ -42,6 +42,8 @@ private:
     // 内部方法
     // 处理关节控制，支持动作组记录
     void handleJointControl();
+    // 处理运动学控制模式
+    void handleKinematicsControl();
     // 处理夹爪控制，支持动作组记录
     void handleGripper();
     // 复位所有舵机
@@ -52,6 +54,12 @@ public:
     void init();
     void update();
     bool isControllerConnected() { return isConnected; }
+    
+    // 获取关节位置
+    int getJointPosition(int jointIndex);
+    
+    // 更新关节位置
+    void updateJointPosition(int jointIndex, int position);
 };
 
 extern PS2Controller ps2Controller;
