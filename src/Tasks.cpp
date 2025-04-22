@@ -4,12 +4,17 @@
 // 实例化机械臂状态
 ArmStatus armStatus;
 
-// 舵机控制队列
+// 全局队列和状态变量
 QueueHandle_t servoCommandQueue;
+QueueHandle_t trajectoryCommandQueue;
 const int queueSize = 20;  // 队列大小
 
-// 命令状态跟踪
+// 状态标志
 volatile bool isCommandExecuting = false;
+volatile bool isTrajectoryRunning = false;
+
+// 全局轨迹执行器
+TrajectoryExecutor* trajectoryExecutor = nullptr;
 
 // 网络服务任务
 void networkTask(void *parameter) {
@@ -95,10 +100,68 @@ void ps2ControllerTask(void *parameter) {
   }
 }
 
+// 轨迹执行任务
+void trajectoryTask(void *parameter) {
+    String cmdBuffer = "";
+    
+    while(1) {
+        // 处理串口命令
+        while(Serial.available()) {
+            char c = Serial.read();
+            if(c == '\n') {
+                // 解析并执行轨迹命令
+                if(cmdBuffer.startsWith("JOINT") || 
+                   cmdBuffer.startsWith("LINE") || 
+                   cmdBuffer.startsWith("ARC") || 
+                   cmdBuffer.startsWith("PICK_PLACE")) {
+                    
+                    if(!isTrajectoryRunning && trajectoryExecutor != nullptr) {
+                        TrajectoryCommand cmd;
+                        if(trajectoryExecutor->parseCommand(cmdBuffer, cmd)) {
+                            if(trajectoryExecutor->executeCommand(cmd)) {
+                                isTrajectoryRunning = true;
+                                Serial.println("轨迹执行开始");
+                            } else {
+                                Serial.println("轨迹执行失败");
+                            }
+                        } else {
+                            Serial.println("命令格式错误");
+                        }
+                    } else {
+                        Serial.println("上一个轨迹正在执行中");
+                    }
+                }
+                cmdBuffer = "";
+            } else {
+                cmdBuffer += c;
+            }
+        }
+        
+        // 更新轨迹执行
+        if(isTrajectoryRunning && trajectoryExecutor != nullptr) {
+            trajectoryExecutor->update();
+            
+            // 检查轨迹是否完成
+            if(trajectoryExecutor->isTrajectoryFinished()) {
+                isTrajectoryRunning = false;
+                Serial.println("轨迹执行完成");
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(10));  // 10ms更新频率
+    }
+}
+
 // 创建并启动所有任务
 void setupTasks() {
   // 创建命令队列
   servoCommandQueue = xQueueCreate(queueSize, sizeof(ServoCommand));
+  trajectoryCommandQueue = xQueueCreate(queueSize, sizeof(TrajectoryCommand));
+  
+  // 创建轨迹执行器实例
+  static TrajectoryPlanner planner;
+  static RobotKinematics kinematics;
+  trajectoryExecutor = new TrajectoryExecutor(planner, kinematics);
   
   // 创建网络服务任务在核心1上运行
   xTaskCreatePinnedToCore(
@@ -142,5 +205,16 @@ void setupTasks() {
     1,                         // 任务优先级
     NULL,                      // 任务句柄
     1                          // 修改到核心1，不干扰控制任务
+  );
+
+  // 创建轨迹执行任务在核心1上运行
+  xTaskCreatePinnedToCore(
+    trajectoryTask,      // 任务函数
+    "TrajectoryTask",    // 任务名称
+    8192,               // 堆栈大小
+    NULL,               // 任务参数
+    1,                  // 任务优先级
+    NULL,               // 任务句柄
+    1                   // 运行的核心（Core 1）
   );
 }

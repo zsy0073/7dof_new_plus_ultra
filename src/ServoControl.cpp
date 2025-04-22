@@ -14,6 +14,9 @@ const int gripperServo = 8;
 // 记录最后一次舵机移动预计完成的时间
 unsigned long servoLastMoveEndTime = 0;
 
+// 定义用于跟踪执行状态的变量
+bool isExecuting_ = false;  // 添加这一行来定义变量
+
 // 角度转换辅助函数 - 用于240度舵机
 // 将角度值(0-240度)转换为舵机控制值(0-1000)
 int angleToPulse(float angle) {
@@ -290,6 +293,33 @@ void moveMultipleServos(LobotServo servoArray[], int servoCount, int moveTime) {
   Serial.print(servoCount);
   Serial.print(" 个舵机，时间：");
   Serial.println(moveTime);
+}
+
+// 检查所有舵机是否就绪（没有正在执行的命令）
+bool isServosReady() {
+    return !isExecuting_ && !isPlaying && 
+           (millis() >= servoLastMoveEndTime);
+}
+
+// 获取当前关节角度（度）
+void getCurrentJointAngles(float angles[7]) {
+    for(int i = 0; i < 7; i++) {
+        angles[i] = pulseToAngle(armStatus.joints[i]);
+    }
+}
+
+// 设置关节角度（度）
+void setJointAngles(const float angles[7], int moveTime) {
+    LobotServo servoArray[7];
+    
+    // 将角度转换为控制值
+    for(int i = 0; i < 7; i++) {
+        servoArray[i].ID = jointServos[i];
+        servoArray[i].Position = angleToPulse(angles[i]);
+    }
+    
+    // 批量控制所有舵机
+    moveMultipleServos(servoArray, 7, moveTime);
 }
 
 // 移除updateServoStatus函数，简化控制流程
