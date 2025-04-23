@@ -163,6 +163,9 @@ void setupTasks() {
   static RobotKinematics kinematics;
   trajectoryExecutor = new TrajectoryExecutor(planner, kinematics);
   
+  // 设置PS2Controller的轨迹执行器引用
+  ps2Controller.setTrajectoryExecutor(trajectoryExecutor);
+  
   // 创建网络服务任务在核心1上运行
   xTaskCreatePinnedToCore(
     networkTask,     // 任务函数

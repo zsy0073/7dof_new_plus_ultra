@@ -16,6 +16,10 @@ PS2Controller::PS2Controller() {
     }
     
     gripperPos = 500; // 夹爪初始位置
+    
+    // 初始化轨迹相关变量
+    isTrajectoryRunning = false;
+    trajectoryExecutor = nullptr;
 }
 
 void PS2Controller::init() {
@@ -91,6 +95,12 @@ void PS2Controller::update() {
             return;
         }
     } else {
+        // 检测三角键按下，启动搬运演示
+        if (ps2x.ButtonPressed(PSB_TRIANGLE)) {
+            Serial.println("三角键按下，启动搬运演示");
+            handleDemoPickPlace();
+        }
+        
         // 处理控制逻辑
         handleJointControl();
         handleGripper();
@@ -239,5 +249,70 @@ void PS2Controller::resetAll() {
             joints[i].targetSpeed = 0;
         }
         gripperPos = 500;
+    }
+}
+
+// 处理三角键的搬运演示功能
+void PS2Controller::handleDemoPickPlace() {
+    // 检查是否可以执行轨迹（当前没有其他轨迹在执行）
+    if (isTrajectoryRunning || isPlaying || isRecording) {
+        Serial.println("无法启动搬运演示：当前有任务正在执行");
+        return;
+    }
+    
+    // 参考MATLAB脚本中的搬运位置定义
+    // 创建Pick&Place轨迹命令
+    TrajectoryCommand cmd;
+    cmd.type = TrajectoryCommandType::PICK_PLACE;
+    
+    // A点位置 - 工作台右侧
+    Matrix4d pick_pos = Matrix4d::Identity();
+    // 设置末端执行器朝下（绕Y轴旋转180度）
+    Matrix3d Ry180;
+    Ry180 << -1, 0, 0,
+              0, 1, 0,
+              0, 0, -1;
+    pick_pos.block<3,3>(0,0) = Ry180;
+    // 设置位置 x前方25cm，y右侧20cm，z高度2cm
+    pick_pos(0,3) = 0.25;  // x
+    pick_pos(1,3) = 0.2;   // y
+    pick_pos(2,3) = 0.02;  // z
+    
+    // B点位置 - 工作台左侧
+    Matrix4d place_pos = Matrix4d::Identity();
+    place_pos.block<3,3>(0,0) = Ry180;
+    // 设置位置 x前方25cm，y左侧20cm，z高度2cm
+    place_pos(0,3) = 0.25;  // x
+    place_pos(1,3) = -0.2;  // y
+    place_pos(2,3) = 0.02;  // z
+    
+    // 提取位置和朝向信息给命令
+    cmd.position = Vector3d(pick_pos(0,3), pick_pos(1,3), pick_pos(2,3));
+    
+    // 从旋转矩阵提取RPY角度
+    Matrix3d R = pick_pos.block<3,3>(0,0);
+    double roll = atan2(R(2,1), R(2,2));
+    double pitch = atan2(-R(2,0), sqrt(R(2,1)*R(2,1) + R(2,2)*R(2,2)));
+    double yaw = atan2(R(1,0), R(0,0));
+    cmd.orientation = Vector3d(roll, pitch, yaw);
+    
+    // 设置放置位置
+    cmd.viaPoint = Vector3d(place_pos(0,3), place_pos(1,3), place_pos(2,3));
+    
+    // 设置提升高度和执行时间
+    cmd.liftHeight = 0.1;  // 提升高度10cm
+    cmd.duration = 10.0;   // 总执行时间10秒
+    
+    // 如果轨迹执行器可用，执行轨迹
+    if (trajectoryExecutor != nullptr) {
+        Serial.println("启动搬运演示：从右侧工作台到左侧工作台");
+        if (trajectoryExecutor->executeCommand(cmd)) {
+            isTrajectoryRunning = true;
+            Serial.println("搬运演示轨迹开始执行");
+        } else {
+            Serial.println("搬运演示轨迹执行失败");
+        }
+    } else {
+        Serial.println("轨迹执行器未初始化，无法执行搬运演示");
     }
 }

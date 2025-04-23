@@ -6,6 +6,7 @@
 #include "Config.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include "TrajectoryExecutor.h"  // 添加轨迹执行器头文件
 
 // 控制参数 - 保留所有参数，因为都在使用中
 #define DEAD_ZONE 70          // 摇杆死区值
@@ -39,6 +40,10 @@ private:
     JointState joints[7];  // 7个关节的状态
     int gripperPos;        // 夹爪位置
     
+    // 轨迹相关变量
+    bool isTrajectoryRunning;     // 是否正在执行轨迹
+    TrajectoryExecutor* trajectoryExecutor;  // 轨迹执行器指针
+    
     // 内部方法
     // 处理关节控制，支持动作组记录
     void handleJointControl();
@@ -46,12 +51,17 @@ private:
     void handleGripper();
     // 复位所有舵机
     void resetAll();
+    // 处理三角键的演示功能 - 执行搬运任务
+    void handleDemoPickPlace();
 
 public:
     PS2Controller();
     void init();
     void update();
     bool isControllerConnected() { return isConnected; }
+    
+    // 设置轨迹执行器
+    void setTrajectoryExecutor(TrajectoryExecutor* executor) { trajectoryExecutor = executor; }
 };
 
 extern PS2Controller ps2Controller;
