@@ -322,4 +322,3 @@ void setJointAngles(const float angles[7], int moveTime) {
     moveMultipleServos(servoArray, 7, moveTime);
 }
 
-// 移除updateServoStatus函数，简化控制流程

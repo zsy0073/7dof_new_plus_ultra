@@ -60,6 +60,8 @@ private:
     void handleDemoPickPlace();
     // 记录当前关节角度
     void recordJointAngles();
+    // 记录当前的关节角度（即使不在轨迹执行中）
+    void recordCurrentJointAngles();
     // 输出记录的关节角度矩阵到串口
     void outputJointAnglesMatrix();
     // 重置关节角度记录

@@ -3,6 +3,8 @@
 
 TrajectoryExecutor::TrajectoryExecutor(TrajectoryPlanner& planner, RobotKinematics& kinematics)
     : planner_(planner), kinematics_(kinematics) {
+    // 初始化当前关节角度为零
+    current_angles_ = VectorXd::Zero(ARM_DOF);
 }
 
 bool TrajectoryExecutor::parseCommand(const String& cmdStr, TrajectoryCommand& cmd) {
@@ -203,6 +205,25 @@ bool TrajectoryExecutor::executeCommand(const TrajectoryCommand& cmd) {
     }
 }
 
+void TrajectoryExecutor::sendToServos(const VectorXd& angles) {
+    // 创建舵机批量控制数组
+    LobotServo servoArray[7];
+    
+    // 将弧度转换为控制值(0-1000)
+    for(int i = 0; i < 7; i++) {
+        float angle_deg = angles(i) * 180.0f / M_PI;
+        int pulse = angleToPulse(angle_deg);
+        servoArray[i].ID = jointServos[i];
+        servoArray[i].Position = pulse;
+    }
+    
+    // 设置一个合理的移动时间(100ms)
+    const int moveTime = 100;
+    
+    // 批量控制所有舵机
+    moveMultipleServos(servoArray, 7, moveTime);
+}
+
 void TrajectoryExecutor::update() {
     if(!isExecuting_) return;
     
@@ -215,6 +236,10 @@ void TrajectoryExecutor::update() {
         // 发送关节角度给舵机
         VectorXd angles = trajectory_.row(currentPoint_);
         sendToServos(angles);
+        
+        // 更新当前关节角度
+        current_angles_ = angles;
+        
         currentPoint_++;
     }
     
@@ -235,24 +260,7 @@ float TrajectoryExecutor::getProgress() const {
     return static_cast<float>(currentPoint_) / trajectory_.rows();
 }
 
-void TrajectoryExecutor::sendToServos(const VectorXd& angles) {
-    // 创建舵机批量控制数组
-    LobotServo servoArray[7];
-    
-    // 将弧度转换为控制值(0-1000)
-    for(int i = 0; i < 7; i++) {
-        float angle_deg = angles(i) * 180.0f / M_PI;
-        int pulse = angleToPulse(angle_deg);
-        servoArray[i].ID = jointServos[i];
-        servoArray[i].Position = pulse;
-    }
-    
-    // 设置一个合理的移动时间(100ms)
-    const int moveTime = 100;
-    
-    // 批量控制所有舵机
-    moveMultipleServos(servoArray, 7, moveTime);
-}
+
 
 void TrajectoryExecutor::setCalculationQueues(QueueHandle_t commandQueue, QueueHandle_t resultQueue) {
     calcCommandQueue_ = commandQueue;
@@ -302,5 +310,75 @@ VectorXd TrajectoryExecutor::getCurrentJointAngles() const {
         current_q(i) = angle_deg * M_PI / 180.0;
     }
     
+    // 注意：这里不能直接修改，因为方法是const修饰的
+    // 需要在非const方法中更新current_angles_
+    
     return current_q;
+}
+
+// 添加一个安全的无奇异初始位置方法
+bool TrajectoryExecutor::moveToSafePose() {
+    // 创建一个安全的初始姿态，避开奇异点
+    VectorXd safe_q = VectorXd::Zero(ARM_DOF);
+    // 这个姿态应该避开机械臂的奇异点
+    // 例如：轻度弯曲每个关节，避免关节完全伸直或重合
+    safe_q << 0.0, M_PI/6, 0.0, M_PI/3, 0.0, M_PI/4, 0.0;
+    
+    // 检查该位置是否有效
+    Matrix4d test_pose;
+    if (!kinematics_.forwardKinematics(safe_q, test_pose)) {
+        Serial.println("警告: 无法计算安全位置的正向运动学");
+        return false;
+    }
+    
+    // 使用现有方法移动到安全位置
+    Serial.println("正在移动到安全的无奇异初始位置...");
+    
+    // 直接使用现有的sendToServos方法发送舵机命令
+    sendToServos(safe_q);
+    
+    // 等待移动完成
+    delay(2000); // 给予充足时间完成移动
+    
+    // 更新当前关节角度
+    current_angles_ = safe_q;
+    
+    Serial.println("已移动到安全的无奇异初始位置");
+    return true;
+}
+
+bool TrajectoryExecutor::executeExampleTrajectory() {
+    if(isExecuting_) {
+        Serial.println("错误: 当前正在执行轨迹，无法启动示例轨迹");
+        return false;
+    }
+    
+    // 创建拾放轨迹命令
+    TrajectoryCommand cmd;
+    cmd.type = TrajectoryCommandType::PICK_PLACE;
+    
+    // 设置拾取位置: 前方25cm，右侧20cm，高度2cm
+    cmd.position = Vector3d(0.25, 0.2, 0.02);
+    
+    // 设置放置位置: 前方25cm，左侧20cm，高度2cm
+    cmd.viaPoint = Vector3d(0.25, -0.2, 0.02);
+    
+    // 设置姿态: 垂直向下抓取 (0, 180, 0)度 - 转换为弧度
+    cmd.orientation = Vector3d(0, M_PI, 0);
+    
+    // 设置抬升高度和持续时间
+    cmd.liftHeight = 0.1;    // 抬升10cm
+    cmd.duration = 30.0;     // 30秒完成整个轨迹
+    
+    // 输出示例轨迹信息
+    Serial.println("执行示例拾放轨迹:");
+    Serial.printf("  拾取位置: [%.2f, %.2f, %.2f]\n", 
+                 cmd.position(0), cmd.position(1), cmd.position(2));
+    Serial.printf("  放置位置: [%.2f, %.2f, %.2f]\n", 
+                 cmd.viaPoint(0), cmd.viaPoint(1), cmd.viaPoint(2));
+    Serial.printf("  抬升高度: %.2f, 持续时间: %.1f秒\n", 
+                 cmd.liftHeight, cmd.duration);
+    
+    // 执行命令
+    return executeCommand(cmd);
 }

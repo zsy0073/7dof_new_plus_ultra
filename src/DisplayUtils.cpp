@@ -83,3 +83,107 @@ void initDisplayAndSensor() {
   display.setTextColor(WHITE);
   displayMessage(); // 添加调用displayMessage函数更新显示内容
 }
+
+// 显示进度消息
+void displayProgressMessage(const String& task, int progress) {
+  // 清除屏幕
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  
+  // 显示任务名称
+  display.setCursor(0, 0);
+  display.print("任务: ");
+  display.println(task);
+  
+  // 显示进度百分比
+  display.setCursor(0, 15);
+  display.print("进度: ");
+  display.print(progress);
+  display.println("%");
+  
+  // 绘制进度条
+  display.drawRect(0, 30, 128, 10, WHITE);
+  display.fillRect(2, 32, 124 * progress / 100, 6, WHITE);
+  
+  // 更新数据到串口
+  Serial.print("进度: ");
+  Serial.print(task);
+  Serial.print(" ");
+  Serial.print(progress);
+  Serial.println("%");
+  
+  // 更新显示
+  display.display();
+}
+
+// 显示带有点数信息的进度消息
+void displayProgressWithPoints(const String& task, int progress, int currentPoints, int totalPoints) {
+  // 清除屏幕
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  
+  // 显示任务名称
+  display.setCursor(0, 0);
+  display.print("任务: ");
+  display.println(task);
+  
+  // 显示进度百分比
+  display.setCursor(0, 10);
+  display.print("进度: ");
+  display.print(progress);
+  display.println("%");
+  
+  // 显示点数信息
+  display.setCursor(0, 20);
+  display.print("点数: ");
+  display.print(currentPoints);
+  display.print("/");
+  display.println(totalPoints);
+  
+  // 绘制进度条
+  display.drawRect(0, 30, 128, 10, WHITE);
+  display.fillRect(2, 32, 124 * progress / 100, 6, WHITE);
+  
+  // 更新数据到串口
+  Serial.print("进度: ");
+  Serial.print(task);
+  Serial.print(" ");
+  Serial.print(progress);
+  Serial.print("% (点数: ");
+  Serial.print(currentPoints);
+  Serial.print("/");
+  Serial.print(totalPoints);
+  Serial.println(")");
+  
+  // 更新显示
+  display.display();
+}
+
+// 显示错误消息
+void displayErrorMessage(const String& error) {
+  // 清除屏幕
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  
+  // 显示错误标题
+  display.setCursor(0, 0);
+  display.println("错误信息:");
+  
+  // 显示错误内容
+  display.setCursor(0, 15);
+  display.println(error);
+  
+  // 显示提示
+  display.setCursor(0, 45);
+  display.println("按下手柄按键重试");
+  
+  // 更新到串口
+  Serial.print("错误: ");
+  Serial.println(error);
+  
+  // 更新显示
+  display.display();
+}

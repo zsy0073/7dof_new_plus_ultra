@@ -33,6 +33,12 @@ public:
     // 设置采样时间和速度限制
     void setTimeParams(double sample_time, double max_joint_vel, double max_joint_acc);
     
+    // 设置最大轨迹点数
+    void setMaxPoints(int max_points);
+    
+    // 获取当前最大点数设置
+    int getMaxPoints() const;
+    
     // 五次多项式轨迹规划
     void planJointTrajectory(const VectorXd& q_start, const VectorXd& q_end,
                            double duration, MatrixXd& trajectory, VectorXd& time_points);
@@ -54,7 +60,7 @@ public:
                                MatrixXd& trajectory, VectorXd& time_points);
                                
     // 笛卡尔空间Pick&Place轨迹规划
-    void planPickAndPlace(const Matrix4d& pick_pos, const Matrix4d& place_pos,
+    void planPickAndPlace(const Matrix4d& T_current, const Matrix4d& pick_pos, const Matrix4d& place_pos,
                         double lift_height, double move_time,
                         RobotKinematics& kinematics,
                         MatrixXd& trajectory, VectorXd& time_points);
@@ -63,6 +69,10 @@ private:
     double sample_time_;      // 采样时间间隔
     double max_joint_vel_;    // 最大关节速度
     double max_joint_acc_;    // 最大关节加速度
+    int max_points_;          // 最大轨迹点数
+    
+    // 计算适应点数限制的采样时间
+    double calculateSampleTime(double duration, int desired_points);
     
     // 五次多项式系数计算
     void computeQuinticCoeff(double q0, double qf, double T,

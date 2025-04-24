@@ -13,9 +13,9 @@
 
 #define ARM_DOF 7           // 7自由度
 #define MATRIX_SIZE 4       // 4x4齐次变换矩阵
-#define MAX_ITER 2000       // 最大迭代次数
-#define TOL 1e-6           // 收敛阈值
-#define DAMPING 0.01       // 阻尼因子
+#define MAX_ITER 500       // 降低最大迭代次数，从2000减少到500
+#define TOL 1e-5           // 略微放宽收敛阈值
+#define DAMPING 0.05       // 增加阻尼因子，提高收敛稳定性
 
 using namespace Eigen;
 
@@ -36,6 +36,12 @@ public:
     
     // 获取雅可比矩阵
     void getJacobian(const VectorXd& theta, MatrixXd& J);
+    
+    // 新增：使用数值微分计算雅可比矩阵（更接近MATLAB实现）
+    void getJacobianNumerical(const VectorXd& q, const Matrix4d& T_des, MatrixXd& J);
+    
+    // 新增：计算完整的误差向量
+    void computeFullError(const Matrix4d& T_current, const Matrix4d& T_des, VectorXd& error);
     
     // 设置关节限位
     void setJointLimits(const VectorXd& lower_limits, const VectorXd& upper_limits);

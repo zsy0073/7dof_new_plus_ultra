@@ -106,6 +106,9 @@ void PS2Controller::update() {
         // 检测方框键按下，输出轨迹记录矩阵
         if (ps2x.ButtonPressed(PSB_SQUARE)) {
             Serial.println("方框键按下，输出关节角度矩阵");
+            // 先记录当前关节角度
+            recordCurrentJointAngles();
+            // 然后输出所有记录的关节角度矩阵
             outputJointAnglesMatrix();
         }
         

@@ -33,47 +33,46 @@ class TrajectoryExecutor {
 public:
     TrajectoryExecutor(TrajectoryPlanner& planner, RobotKinematics& kinematics);
     
-    // 解析串口命令
     bool parseCommand(const String& cmdStr, TrajectoryCommand& cmd);
-    
-    // 执行轨迹命令
     bool executeCommand(const TrajectoryCommand& cmd);
-    
-    // 检查轨迹是否完成
+    void update();
     bool isTrajectoryFinished() const;
-    
-    // 获取当前执行进度(0-1)
     float getProgress() const;
     
-    // 更新轨迹执行
-    void update();
-    
-    // 新增接口，供轨迹计算任务使用
     void setCalculationQueues(QueueHandle_t commandQueue, QueueHandle_t resultQueue);
     bool setTrajectory(const MatrixXd& trajectory, const VectorXd& timePoints);
+    
     VectorXd getCurrentJointAngles() const;
-    RobotKinematics& getKinematics() { return kinematics_; }
+    
+    // 获取轨迹规划器和运动学引用，便于计算任务使用
     TrajectoryPlanner& getPlanner() { return planner_; }
+    RobotKinematics& getKinematics() { return kinematics_; }
+    
+    // 添加发送到舵机的方法声明
+    void sendToServos(const VectorXd& angles);
+    
+    // 移动到安全的无奇异位置
+    bool moveToSafePose();
+    
+    // 添加执行示例轨迹的方法
+    bool executeExampleTrajectory();
     
 private:
     TrajectoryPlanner& planner_;
     RobotKinematics& kinematics_;
     
-    MatrixXd trajectory_;         // 当前轨迹
-    VectorXd timePoints_;         // 轨迹时间点
-    int currentPoint_ = 0;        // 当前执行到的轨迹点
-    unsigned long startTime_ = 0;  // 轨迹开始时间
-    bool isExecuting_ = false;    // 是否正在执行轨迹
+    MatrixXd trajectory_;
+    VectorXd timePoints_;
+    int currentPoint_ = 0;
+    unsigned long startTime_ = 0;
+    bool isExecuting_ = false;
     
-    // 计算队列
     QueueHandle_t calcCommandQueue_ = nullptr;
     QueueHandle_t calcResultQueue_ = nullptr;
-    
-    // 互斥锁，保护轨迹数据
     SemaphoreHandle_t trajectoryMutex_ = nullptr;
     
-    // 发送关节角度到舵机
-    void sendToServos(const VectorXd& angles);
+    // 添加当前关节角度存储
+    VectorXd current_angles_ = VectorXd::Zero(ARM_DOF);
 };
 
 #endif // TRAJECTORY_EXECUTOR_H
