@@ -21,6 +21,7 @@ void servoControlTask(void *parameter);
 void displayAndTemperatureTask(void *parameter);
 void ps2ControllerTask(void *parameter);
 void trajectoryTask(void *parameter);
+void trajectoryCalculationTask(void *parameter);
 void setupTasks();
 
 // 外部变量声明

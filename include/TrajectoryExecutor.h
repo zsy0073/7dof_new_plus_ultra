@@ -2,6 +2,8 @@
 #define TRAJECTORY_EXECUTOR_H
 
 #include <Eigen.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include "TrajectoryPlanner.h"
 #include "RobotKinematics.h"
 #include "ServoControl.h"
@@ -46,6 +48,13 @@ public:
     // 更新轨迹执行
     void update();
     
+    // 新增接口，供轨迹计算任务使用
+    void setCalculationQueues(QueueHandle_t commandQueue, QueueHandle_t resultQueue);
+    bool setTrajectory(const MatrixXd& trajectory, const VectorXd& timePoints);
+    VectorXd getCurrentJointAngles() const;
+    RobotKinematics& getKinematics() { return kinematics_; }
+    TrajectoryPlanner& getPlanner() { return planner_; }
+    
 private:
     TrajectoryPlanner& planner_;
     RobotKinematics& kinematics_;
@@ -55,6 +64,13 @@ private:
     int currentPoint_ = 0;        // 当前执行到的轨迹点
     unsigned long startTime_ = 0;  // 轨迹开始时间
     bool isExecuting_ = false;    // 是否正在执行轨迹
+    
+    // 计算队列
+    QueueHandle_t calcCommandQueue_ = nullptr;
+    QueueHandle_t calcResultQueue_ = nullptr;
+    
+    // 互斥锁，保护轨迹数据
+    SemaphoreHandle_t trajectoryMutex_ = nullptr;
     
     // 发送关节角度到舵机
     void sendToServos(const VectorXd& angles);

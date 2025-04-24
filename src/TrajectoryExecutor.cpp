@@ -169,108 +169,36 @@ bool TrajectoryExecutor::parseCommand(const String& cmdStr, TrajectoryCommand& c
 bool TrajectoryExecutor::executeCommand(const TrajectoryCommand& cmd) {
     if(isExecuting_) return false;
     
-    try {
-        // 获取当前机械臂状态
-        VectorXd current_q = VectorXd::Zero(7);
-        
-        // 从舵机读取当前关节角度
-        for(int i = 0; i < 7; i++) {
-            // 从全局状态获取当前位置
-            int pulse = armStatus.joints[i];
-            float angle_deg = pulseToAngle(pulse);
-            current_q(i) = angle_deg * M_PI / 180.0;
-        }
-        
-        // 创建一个位姿矩阵
-        Matrix4d current_pose = Matrix4d::Identity();
-        // 调用前向运动学计算当前位姿
-        kinematics_.forwardKinematics(current_q, current_pose);
-        
-        // 根据命令类型生成轨迹
-        switch(cmd.type) {
-            case TrajectoryCommandType::JOINT_SPACE: {
-                planner_.planJointTrajectory(current_q, cmd.jointAngles, 
-                                          cmd.duration, trajectory_, timePoints_);
-                break;
-            }
-            case TrajectoryCommandType::LINE: {
-                Matrix4d target_pose = Matrix4d::Identity();
-                
-                // 直接使用 RPY 计算旋转矩阵
-                Matrix3d R_target = Matrix3d::Identity();
-                double sr = sin(cmd.orientation(0)), cr = cos(cmd.orientation(0));
-                double sp = sin(cmd.orientation(1)), cp = cos(cmd.orientation(1));
-                double sy = sin(cmd.orientation(2)), cy = cos(cmd.orientation(2));
-                
-                R_target(0,0) = cy*cp;    R_target(0,1) = cy*sp*sr-sy*cr;    R_target(0,2) = cy*sp*cr+sy*sr;
-                R_target(1,0) = sy*cp;    R_target(1,1) = sy*sp*sr+cy*cr;    R_target(1,2) = sy*sp*cr-cy*sr;
-                R_target(2,0) = -sp;      R_target(2,1) = cp*sr;             R_target(2,2) = cp*cr;
-                
-                target_pose.block<3,3>(0,0) = R_target;
-                target_pose.block<3,1>(0,3) = cmd.position;
-                
-                planner_.planCartesianLine(current_pose, target_pose,
-                                         cmd.duration, kinematics_,
-                                         trajectory_, timePoints_);
-                break;
-            }
-            case TrajectoryCommandType::ARC: {
-                Matrix4d target_pose = Matrix4d::Identity();
-                
-                // 直接使用 RPY 计算旋转矩阵
-                Matrix3d R_target = Matrix3d::Identity();
-                double sr = sin(cmd.orientation(0)), cr = cos(cmd.orientation(0));
-                double sp = sin(cmd.orientation(1)), cp = cos(cmd.orientation(1));
-                double sy = sin(cmd.orientation(2)), cy = cos(cmd.orientation(2));
-                
-                R_target(0,0) = cy*cp;    R_target(0,1) = cy*sp*sr-sy*cr;    R_target(0,2) = cy*sp*cr+sy*sr;
-                R_target(1,0) = sy*cp;    R_target(1,1) = sy*sp*sr+cy*cr;    R_target(1,2) = sy*sp*cr-cy*sr;
-                R_target(2,0) = -sp;      R_target(2,1) = cp*sr;             R_target(2,2) = cp*cr;
-                
-                target_pose.block<3,3>(0,0) = R_target;
-                target_pose.block<3,1>(0,3) = cmd.position;
-                
-                planner_.planCartesianArc(current_pose, target_pose,
-                                        cmd.viaPoint, cmd.duration,
-                                        kinematics_, trajectory_, timePoints_);
-                break;
-            }
-            case TrajectoryCommandType::PICK_PLACE: {
-                Matrix4d pick_pose = Matrix4d::Identity();
-                
-                // 直接使用 RPY 计算旋转矩阵
-                Matrix3d R_pick = Matrix3d::Identity();
-                double sr = sin(cmd.orientation(0)), cr = cos(cmd.orientation(0));
-                double sp = sin(cmd.orientation(1)), cp = cos(cmd.orientation(1));
-                double sy = sin(cmd.orientation(2)), cy = cos(cmd.orientation(2));
-                
-                R_pick(0,0) = cy*cp;    R_pick(0,1) = cy*sp*sr-sy*cr;    R_pick(0,2) = cy*sp*cr+sy*sr;
-                R_pick(1,0) = sy*cp;    R_pick(1,1) = sy*sp*sr+cy*cr;    R_pick(1,2) = sy*sp*cr-cy*sr;
-                R_pick(2,0) = -sp;      R_pick(2,1) = cp*sr;             R_pick(2,2) = cp*cr;
-                
-                pick_pose.block<3,3>(0,0) = R_pick;
-                pick_pose.block<3,1>(0,3) = cmd.position;
-                
-                Matrix4d place_pose = Matrix4d::Identity();
-                place_pose.block<3,3>(0,0) = R_pick;  // 保持相同姿态
-                place_pose.block<3,1>(0,3) = cmd.viaPoint;  // 放置位置存储在viaPoint中
-                
-                planner_.planPickAndPlace(pick_pose, place_pose,
-                                        cmd.liftHeight, cmd.duration,
-                                        kinematics_, trajectory_, timePoints_);
-                break;
-            }
-        }
-        
+    // 确保计算队列已设置
+    if(calcCommandQueue_ == nullptr || calcResultQueue_ == nullptr) {
+        Serial.println("错误: 轨迹计算队列未设置");
+        return false;
+    }
+    
+    // 发送命令到计算任务
+    if(xQueueSend(calcCommandQueue_, &cmd, pdMS_TO_TICKS(500)) != pdTRUE) {
+        Serial.println("错误: 发送轨迹计算命令失败");
+        return false;
+    }
+    
+    Serial.println("已发送轨迹计算命令，等待计算完成...");
+    
+    // 等待结果 (最多5秒)
+    bool success = false;
+    if(xQueueReceive(calcResultQueue_, &success, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("错误: 等待轨迹计算结果超时");
+        return false;
+    }
+    
+    if(success) {
         // 开始执行轨迹
         currentPoint_ = 0;
         startTime_ = millis();
         isExecuting_ = true;
+        Serial.println("轨迹计算成功，开始执行");
         return true;
-    }
-    catch(const std::exception& e) {
-        Serial.print("轨迹规划错误: ");
-        Serial.println(e.what());
+    } else {
+        Serial.println("轨迹计算失败");
         return false;
     }
 }
@@ -324,4 +252,55 @@ void TrajectoryExecutor::sendToServos(const VectorXd& angles) {
     
     // 批量控制所有舵机
     moveMultipleServos(servoArray, 7, moveTime);
+}
+
+void TrajectoryExecutor::setCalculationQueues(QueueHandle_t commandQueue, QueueHandle_t resultQueue) {
+    calcCommandQueue_ = commandQueue;
+    calcResultQueue_ = resultQueue;
+    
+    // 创建互斥锁保护轨迹数据
+    if(trajectoryMutex_ == nullptr) {
+        trajectoryMutex_ = xSemaphoreCreateMutex();
+    }
+    
+    Serial.println("轨迹计算队列已设置");
+}
+
+bool TrajectoryExecutor::setTrajectory(const MatrixXd& trajectory, const VectorXd& timePoints) {
+    if(trajectoryMutex_ == nullptr) {
+        return false;
+    }
+    
+    if(xSemaphoreTake(trajectoryMutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println("无法获取轨迹互斥锁");
+        return false;
+    }
+    
+    try {
+        // 安全地复制轨迹数据
+        trajectory_ = trajectory;
+        timePoints_ = timePoints;
+        
+        xSemaphoreGive(trajectoryMutex_);
+        return true;
+    }
+    catch(...) {
+        xSemaphoreGive(trajectoryMutex_);
+        Serial.println("设置轨迹数据时发生异常");
+        return false;
+    }
+}
+
+VectorXd TrajectoryExecutor::getCurrentJointAngles() const {
+    VectorXd current_q = VectorXd::Zero(ARM_DOF);
+    
+    // 从舵机读取当前关节角度
+    for(int i = 0; i < ARM_DOF; i++) {
+        // 从全局状态获取当前位置
+        int pulse = armStatus.joints[i];
+        float angle_deg = pulseToAngle(pulse);
+        current_q(i) = angle_deg * M_PI / 180.0;
+    }
+    
+    return current_q;
 }

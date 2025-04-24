@@ -28,7 +28,7 @@ public:
     void setMDHParams(const double* alpha, const double* a, const double* d);
     
     // 正向运动学
-    void forwardKinematics(const VectorXd& theta, Matrix4d& T);
+    bool forwardKinematics(const VectorXd& theta, Matrix4d& T);
     
     // 逆向运动学 (基于阻尼最小二乘法的数值解法)
     bool inverseKinematics(const Matrix4d& T_des, const VectorXd& q0, VectorXd& q_result,
@@ -42,6 +42,9 @@ public:
     
     // 检查关节角度是否在限位内
     bool checkJointLimits(const VectorXd& q);
+    
+    // 欧拉角转旋转矩阵 (新增)
+    Matrix3d eulerToRotation(const Vector3d& euler) const;
 
 private:
     // MDH参数

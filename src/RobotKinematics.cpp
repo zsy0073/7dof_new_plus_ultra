@@ -58,13 +58,19 @@ bool RobotKinematics::checkJointLimits(const VectorXd& q) {
             (q.array() <= joint_upper_limits_.array())).all();
 }
 
-void RobotKinematics::forwardKinematics(const VectorXd& theta, Matrix4d& T) {
+bool RobotKinematics::forwardKinematics(const VectorXd& theta, Matrix4d& T) {
+    if (theta.size() != ARM_DOF) {
+        return false;
+    }
+    
     T = Matrix4d::Identity();
     
     for(int i = 0; i < ARM_DOF; i++) {
         Matrix4d A_i = computeTransform(alpha_(i), a_(i), d_(i), theta(i) + theta_offset_(i));
         T = T * A_i;
     }
+    
+    return true;
 }
 
 bool RobotKinematics::inverseKinematics(const Matrix4d& T_des, const VectorXd& q0, 
@@ -193,4 +199,26 @@ void RobotKinematics::pseudoInverse(const MatrixXd& J, MatrixXd& J_pinv, double 
     
     // 计算阻尼伪逆
     J_pinv = svd.matrixV() * S_pinv.asDiagonal() * svd.matrixU().transpose();
+}
+
+// 欧拉角转旋转矩阵 (RPY: Roll-Pitch-Yaw) 实现
+Matrix3d RobotKinematics::eulerToRotation(const Vector3d& euler) const {
+    // 提取欧拉角 (RPY)
+    double roll = euler(0);
+    double pitch = euler(1);
+    double yaw = euler(2);
+    
+    // 计算三角函数值
+    double sr = sin(roll), cr = cos(roll);
+    double sp = sin(pitch), cp = cos(pitch);
+    double sy = sin(yaw), cy = cos(yaw);
+    
+    // 构建旋转矩阵
+    Matrix3d R = Matrix3d::Zero();
+    
+    R(0,0) = cy*cp;    R(0,1) = cy*sp*sr-sy*cr;    R(0,2) = cy*sp*cr+sy*sr;
+    R(1,0) = sy*cp;    R(1,1) = sy*sp*sr+cy*cr;    R(1,2) = sy*sp*cr-cy*sr;
+    R(2,0) = -sp;      R(2,1) = cp*sr;             R(2,2) = cp*cr;
+    
+    return R;
 }
