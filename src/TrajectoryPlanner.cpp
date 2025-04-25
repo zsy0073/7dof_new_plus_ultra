@@ -474,6 +474,24 @@ void TrajectoryPlanner::planPickAndPlace(const Matrix4d& T_current, const Matrix
     seg.end_pose = place_lift;
     segments.push_back(seg);
     
+    // 7. 新增：从放置位置上方回到预定义的非奇异初始位置
+    
+    // 定义标准非奇异初始位置关节配置 (0 30 0 60 0 45 0度)
+    VectorXd non_singular_config(ARM_DOF);
+    non_singular_config << 0 * M_PI/180.0, 30 * M_PI/180.0, 0 * M_PI/180.0, 
+                           60 * M_PI/180.0, 0 * M_PI/180.0, 45 * M_PI/180.0, 
+                           0 * M_PI/180.0;
+    
+    // 使用正运动学计算非奇异初始位置的位姿矩阵
+    Matrix4d non_singular_pose;
+    kinematics.forwardKinematics(non_singular_config, non_singular_pose);
+    
+    // 添加返回非奇异初始位置的轨迹段
+    seg.duration = move_time;
+    seg.start_pose = place_lift;
+    seg.end_pose = non_singular_pose;  // 使用非奇异初始位置作为返回目标
+    segments.push_back(seg);
+    
     // 执行复合轨迹规划
     planCompositeTrajectory(segments, kinematics, trajectory, time_points);
 }
