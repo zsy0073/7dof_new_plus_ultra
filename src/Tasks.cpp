@@ -221,6 +221,7 @@ bool processTrajectoryCommand(const TrajectoryCommand& cmd) {
     
     Serial.println("开始计算轨迹...");
     Serial.println("进度: 准备运动 0%");
+    displayProgressWithPoints("轨迹计算", 0, 0, 100); // 初始显示0%进度
     FEED_WDT(); // 喂狗
     
     // 获取轨迹规划器和运动学引用
@@ -238,7 +239,7 @@ bool processTrajectoryCommand(const TrajectoryCommand& cmd) {
     bool success = false;
     
     // 输出进度
-    Serial.println("进度: 轨迹计算 10%");
+    Serial.println("进度: 开始轨迹计算");
     
     // 获取当前关节角度
     VectorXd current_q = trajectoryExecutor->getCurrentJointAngles();
@@ -278,6 +279,7 @@ bool processTrajectoryCommand(const TrajectoryCommand& cmd) {
     
     // 根据命令类型计算轨迹
     success = false;
+    int lastDisplayedProgress = 0; // 记录上次显示的进度百分比
     
     if(cmd.type == TrajectoryCommandType::JOINT_SPACE) {
         // 计算关节空间轨迹
@@ -286,7 +288,6 @@ bool processTrajectoryCommand(const TrajectoryCommand& cmd) {
         planner.planJointTrajectory(current_q, cmd.jointAngles, 
                                   cmd.duration, trajectory, timePoints);
         Serial.printf("完成关节空间轨迹计算, 共生成 %d 个点\n", trajectory.rows());
-        FEED_WDT(); // 喂狗
         success = (trajectory.rows() > 0);
     }
     else if(cmd.type == TrajectoryCommandType::LINE) {
@@ -404,6 +405,7 @@ bool processTrajectoryCommand(const TrajectoryCommand& cmd) {
         
         // 输出进度
         Serial.println("进度: 开始计算拾放轨迹 50% (预计点数: 约50点)");
+        displayProgressWithPoints("拾放轨迹", 50, 0, 100); // 更新进度到50%
         
         FEED_WDT(); // 在计算拾放轨迹前喂狗
         
@@ -412,6 +414,8 @@ bool processTrajectoryCommand(const TrajectoryCommand& cmd) {
                                 cmd.liftHeight, cmd.duration, kinematics,
                                 trajectory, timePoints);
         Serial.printf("完成拾放轨迹计算, 共生成 %d 个点\n", trajectory.rows());
+        int totalPoints = trajectory.rows();
+        displayProgressWithPoints("拾放轨迹", 70, totalPoints, totalPoints); // 更新进度到70%
         FEED_WDT(); // 喂狗
         success = (trajectory.rows() > 0);
     }
@@ -419,8 +423,10 @@ bool processTrajectoryCommand(const TrajectoryCommand& cmd) {
     // 更新进度并显示点数
     if (success) {
         Serial.printf("进度: 轨迹完成 70%% (已生成点数: %d)\n", trajectory.rows());
+        displayProgressWithPoints("轨迹验证", 70, trajectory.rows(), trajectory.rows());
     } else {
         Serial.println("轨迹计算失败，未生成有效点");
+        displayErrorMessage("轨迹计算失败");
         isTrajectoryRunning = false;
         return false;
     }
@@ -430,11 +436,24 @@ bool processTrajectoryCommand(const TrajectoryCommand& cmd) {
         // 验证轨迹中的逆运动学解是否都有效
         bool isValid = true;
         int validPoints = 0;
+        int totalPoints = trajectory.rows();
         
         Serial.println("开始验证轨迹点的有效性...");
+        displayProgressWithPoints("轨迹验证", 75, 0, totalPoints); // 开始验证轨迹
+        
         for(int i = 0; i < trajectory.rows(); i++) {
             VectorXd q = trajectory.row(i);
             Matrix4d pose;
+            
+            // 计算当前进度百分比
+            int currentProgress = 30 + (i * 40) / totalPoints; // 验证阶段从30%到70%
+            
+            // 只有当进度变化超过5%时才更新显示
+            if(currentProgress - lastDisplayedProgress >= 5 || i == trajectory.rows() - 1) {
+                displayProgressWithPoints("轨迹验证", currentProgress, i+1, totalPoints);
+                lastDisplayedProgress = currentProgress;
+            }
+            
             if(!kinematics.forwardKinematics(q, pose)) {
                 Serial.printf("警告: 轨迹点 #%d 无效，无法计算正向运动学\n", i+1);
                 isValid = false;
@@ -474,29 +493,38 @@ bool processTrajectoryCommand(const TrajectoryCommand& cmd) {
         
         // 重要: 计算完成后立即记录所有轨迹点
         Serial.printf("[TRAJ_CALC] 开始记录所有计算的轨迹点 (共 %d 个)...\n", trajectory.rows());
+        int totalPoints = trajectory.rows();
+        lastDisplayedProgress = 70; // 重置上次显示的进度为70%
+        
         for(int i = 0; i < trajectory.rows(); i++) {
             VectorXd angles = trajectory.row(i);
-            // 调用记录函数并每10个点输出一次进度
-            if (i % 10 == 0 || i == trajectory.rows() - 1) {
+            
+            // 计算当前进度百分比
+            int currentProgress = 70 + (i * 30) / totalPoints; // 记录阶段从70%到100%
+            
+            // 只有当进度变化超过5%时或最后一个点才更新显示
+            if(currentProgress - lastDisplayedProgress >= 5 || i == trajectory.rows() - 1) {
+                displayProgressWithPoints("记录轨迹", currentProgress, i+1, totalPoints);
+                lastDisplayedProgress = currentProgress;
                 Serial.printf("[TRAJ_CALC] 记录轨迹点 %d/%d, 时间=%.2f秒\n", 
                             i+1, trajectory.rows(), timePoints(i));
             }
-            trajectoryExecutor->recordTrajectoryPoint(angles);
             
-            // 短暂延时确保记录完成
-            if(i % 10 == 0) { // 每10个点延时一次，避免频繁延时
-                vTaskDelay(pdMS_TO_TICKS(1));
-                FEED_WDT(); // 喂狗
-            }
+            trajectoryExecutor->recordTrajectoryPoint(angles);
+            FEED_WDT(); // 定期喂狗
         }
-        Serial.printf("[TRAJ_CALC] 已记录 %d 个轨迹点\n", trajectory.rows());
         
-        FEED_WDT(); // 喂狗
+        // 一旦所有点记录完毕，显示100%进度
+        displayProgressWithPoints("轨迹完成", 100, totalPoints, totalPoints);
         
-        // 将轨迹设置到执行器
-        Serial.printf("正在设置轨迹数据 (%d 个点)...\n", trajectory.rows());
+        // 检查轨迹计算总时间并输出
+        unsigned long calcEndTime = millis();
+        float calcTime = (calcEndTime - calcStartTime) / 1000.0;
+        Serial.printf("[TRAJ_CALC] 轨迹计算和验证总时间: %.2f 秒\n", calcTime);
+        
         if(!trajectoryExecutor->setTrajectory(trajectory, timePoints)) {
             Serial.println("错误: 无法设置轨迹数据");
+            displayErrorMessage("无法设置轨迹数据");
             isTrajectoryRunning = false;
             return false;
         }
@@ -512,10 +540,17 @@ bool processTrajectoryCommand(const TrajectoryCommand& cmd) {
         // 重置状态标志
         isTrajectoryRunning = false;
         
+        // 重置显示进度标志，允许恢复温度显示
+        armStatus.isShowingProgress = false;
+        
         return execResult;
     } else {
         Serial.println("轨迹计算失败");
         isTrajectoryRunning = false;
+        
+        // 轨迹计算失败时也需要重置显示进度标志
+        armStatus.isShowingProgress = false;
+        
         return false;
     }
 }

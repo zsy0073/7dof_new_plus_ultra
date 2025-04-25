@@ -18,6 +18,11 @@ void initI2C() {
 
 //显示函数
 void displayMessage() {
+  // 如果正在显示进度，不要切换回温度显示界面
+  if (armStatus.isShowingProgress) {
+    return;
+  }
+  
   // 读取环境温度
   float ambientTemp = mlx.readAmbientTempC();
   
@@ -84,21 +89,54 @@ void initDisplayAndSensor() {
   displayMessage(); // 添加调用displayMessage函数更新显示内容
 }
 
+// 辅助函数：将中文任务名称转换为英文显示
+String convertTaskNameForDisplay(const String& taskName) {
+  // 将中文任务名称转换为对应的英文名称
+  if (taskName == "轨迹计算") return "Traj Calc";
+  if (taskName == "轨迹执行") return "Traj Exec";
+  if (taskName == "轨迹完成") return "Traj Done";
+  if (taskName == "记录轨迹") return "Record Traj";
+  if (taskName == "正在执行") return "Executing";
+  if (taskName == "计算中") return "Calculating";
+  if (taskName == "验证轨迹") return "Verify Traj";
+  if (taskName == "动作组播放") return "Play Actions";
+  if (taskName == "动作记录") return "Record Action";
+  if (taskName == "正在初始化") return "Initializing";
+  if (taskName == "运动准备") return "Motion Ready";
+  if (taskName == "拾放轨迹") return "Pick&Place";
+  if (taskName == "轨迹验证") return "Traj Verify";
+  if (taskName == "无法设置轨迹数据") return "Traj Data Error";
+  if (taskName == "错误") return "Error";
+  if (taskName == "警告") return "Warning";
+  if (taskName == "准备运动") return "Ready Motion";
+  if (taskName == "任务") return "Task";
+  if (taskName == "进度") return "Progress";
+  
+  // 如果没有匹配项，直接返回原始任务名（可能是英文）
+  return taskName;
+}
+
 // 显示进度消息
 void displayProgressMessage(const String& task, int progress) {
+  // 设置显示进度标志，防止被温度显示中断
+  armStatus.isShowingProgress = true;
+  
   // 清除屏幕
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(WHITE);
   
+  // 获取英文任务名称
+  String displayTask = convertTaskNameForDisplay(task);
+  
   // 显示任务名称
   display.setCursor(0, 0);
-  display.print("任务: ");
-  display.println(task);
+  display.print("Task: ");
+  display.println(displayTask);
   
   // 显示进度百分比
   display.setCursor(0, 15);
-  display.print("进度: ");
+  display.print("Progress: ");
   display.print(progress);
   display.println("%");
   
@@ -107,7 +145,7 @@ void displayProgressMessage(const String& task, int progress) {
   display.fillRect(2, 32, 124 * progress / 100, 6, WHITE);
   
   // 更新数据到串口
-  Serial.print("进度: ");
+  Serial.print("Progress: ");
   Serial.print(task);
   Serial.print(" ");
   Serial.print(progress);
@@ -119,43 +157,48 @@ void displayProgressMessage(const String& task, int progress) {
 
 // 显示带有点数信息的进度消息
 void displayProgressWithPoints(const String& task, int progress, int currentPoints, int totalPoints) {
+  // 设置显示进度标志，防止被温度显示中断
+  armStatus.isShowingProgress = true;
+  
   // 清除屏幕
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(WHITE);
   
+  // 获取英文任务名称
+  String displayTask = convertTaskNameForDisplay(task);
+  
   // 显示任务名称
   display.setCursor(0, 0);
-  display.print("任务: ");
-  display.println(task);
+  display.print("Task: ");
+  display.println(displayTask);
   
   // 显示进度百分比
-  display.setCursor(0, 10);
-  display.print("进度: ");
+  display.setCursor(0, 15);
+  display.print("Progress: ");
   display.print(progress);
   display.println("%");
-  
-  // 显示点数信息
-  display.setCursor(0, 20);
-  display.print("点数: ");
-  display.print(currentPoints);
-  display.print("/");
-  display.println(totalPoints);
   
   // 绘制进度条
   display.drawRect(0, 30, 128, 10, WHITE);
   display.fillRect(2, 32, 124 * progress / 100, 6, WHITE);
   
+  // 显示点数信息
+  display.setCursor(0, 45);
+  display.print("Points: ");
+  display.print(currentPoints);
+  display.print("/");
+  display.print(totalPoints);
+  
   // 更新数据到串口
-  Serial.print("进度: ");
+  Serial.print("Progress: ");
   Serial.print(task);
   Serial.print(" ");
   Serial.print(progress);
-  Serial.print("% (点数: ");
+  Serial.print("% Points: ");
   Serial.print(currentPoints);
   Serial.print("/");
-  Serial.print(totalPoints);
-  Serial.println(")");
+  Serial.println(totalPoints);
   
   // 更新显示
   display.display();
@@ -170,18 +213,19 @@ void displayErrorMessage(const String& error) {
   
   // 显示错误标题
   display.setCursor(0, 0);
-  display.println("错误信息:");
+  display.println("Error:");
   
-  // 显示错误内容
+  // 转换并显示错误内容
+  String displayError = convertTaskNameForDisplay(error);
   display.setCursor(0, 15);
-  display.println(error);
+  display.println(displayError);
   
   // 显示提示
   display.setCursor(0, 45);
-  display.println("按下手柄按键重试");
+  display.println("Press button to retry");
   
   // 更新到串口
-  Serial.print("错误: ");
+  Serial.print("Error: ");
   Serial.println(error);
   
   // 更新显示

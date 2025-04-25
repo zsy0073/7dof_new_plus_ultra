@@ -76,6 +76,7 @@ struct ArmStatus {
   int gripper = 500; // 初始化为中心位置
   bool updated = false;
   unsigned long lastCommandTime = 0; // 最后一次命令时间记录
+  bool isShowingProgress = false;    // 添加标志来指示是否正在显示进度
 };
 
 // 舵机控制状态追踪结构体 - 简化版
