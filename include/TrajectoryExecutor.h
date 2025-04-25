@@ -10,6 +10,18 @@
 
 using namespace Eigen;
 
+// 轨迹点数据结构
+struct TrajectoryPoint {
+    float jointAngles[ARM_DOF];  // 关节角度数组(度)
+    unsigned long timestamp;     // 时间戳
+};
+
+// 全局轨迹存储
+#define MAX_TRAJECTORY_POINTS 1000
+extern TrajectoryPoint g_recordedPoints[MAX_TRAJECTORY_POINTS];
+extern int g_recordedPointCount;
+extern SemaphoreHandle_t g_pointsMutex;
+
 // 轨迹命令类型
 enum class TrajectoryCommandType {
     JOINT_SPACE,    // 关节空间运动
@@ -56,6 +68,21 @@ public:
     
     // 添加执行示例轨迹的方法
     bool executeExampleTrajectory();
+    
+    // 添加获取当前轨迹点的方法
+    int getCurrentPoint() const { return currentPoint_; }
+    
+    // 添加检查是否正在执行轨迹的方法
+    bool isExecuting() const { return isExecuting_; }
+    
+    // 记录轨迹点数据到全局存储 - 新方法
+    void recordTrajectoryPoint(const VectorXd& angles);
+    
+    // 重置记录的轨迹点
+    static void resetRecordedPoints();
+    
+    // 将记录的轨迹点以矩阵形式输出到串口
+    static void outputTrajectoryMatrix();
     
 private:
     TrajectoryPlanner& planner_;

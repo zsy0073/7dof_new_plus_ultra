@@ -83,8 +83,18 @@ void TrajectoryPlanner::planJointTrajectory(const VectorXd& q_start, const Vecto
             trajectory(j, i) = quinticPosition(t, coeffs.row(i));
         }
         
-        // 移除每个点的详细输出，不再输出中间计算过程
+        // 输出当前计算出的轨迹点关节角度
+        Serial.printf("关节轨迹点 #%d (时间=%.2f秒) 角度: [", j+1, t);
+        for(int i = 0; i < ARM_DOF; i++) {
+            float angle_deg = trajectory(j, i) * 180.0f / M_PI;
+            Serial.printf("%.2f", angle_deg);
+            if(i < ARM_DOF - 1) Serial.print(", ");
+        }
+        Serial.println("]°");
     }
+    
+    // 平滑轨迹中的角度突变
+    smoothJointTrajectory(trajectory, 60.0); // 60度作为默认阈值
     
     Serial.println("[轨迹] 关节轨迹规划完成");
 }
@@ -148,8 +158,15 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
     
     // 计算每个时间点的位姿
     bool solution_found = false;
-    int max_attempts = 5;  // 最大重试次数
+    int max_attempts = 1;  // 最大重试次数
     
+    // 定义一个非奇异的参考配置作为初始位置
+    VectorXd reference_config(ARM_DOF);
+    // 使用以度为单位的参考配置 (0 30 0 60 0 45 0)
+    reference_config << 0 * M_PI/180.0, 30 * M_PI/180.0, 0 * M_PI/180.0, 
+                      60 * M_PI/180.0, 0 * M_PI/180.0, 45 * M_PI/180.0, 
+                      0 * M_PI/180.0;
+
     for(int i = 0; i < n_points; i++) {
         // 均匀分布时间点
         double t = i * duration / (n_points - 1);
@@ -186,9 +203,22 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
             bool success;
             
             if(i == 0) {
-                // 使用随机初始猜测值
-                VectorXd q0 = VectorXd::Random(ARM_DOF) * M_PI;
-                success = kinematics.inverseKinematics(T_current, q0, q_attempt);
+                // 对于第一个点，必须严格使用预定义的非奇异参考配置作为初始猜测值
+                success = kinematics.inverseKinematics(T_current, reference_config, q_attempt);
+                
+                // 打印参考配置信息以便调试
+                Serial.println("使用无奇异参考配置作为初始点：");
+                for(int j = 0; j < ARM_DOF; j++) {
+                    Serial.printf("  关节%d: %.2f度\n", j+1, reference_config(j) * 180.0/M_PI);
+                }
+                
+                // 如果使用参考配置失败，输出警告但不要尝试其他配置
+                if(!success) {
+                    Serial.println("警告：无奇异参考配置逆解失败！");
+                    // 仍然使用参考配置，而不是退化到零位置
+                    q_attempt = reference_config;
+                    success = true;  // 强制使用参考配置
+                }
             } else {
                 // 使用上一点作为初始猜测值
                 success = kinematics.inverseKinematics(T_current, trajectory.row(i-1), q_attempt);
@@ -223,6 +253,15 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
         
         trajectory.row(i) = q_best;
         
+        // 输出当前计算出的轨迹点关节角度
+        Serial.printf("直线轨迹点 #%d (时间=%.2f秒) 角度: [", i+1, t);
+        for(int j = 0; j < ARM_DOF; j++) {
+            float angle_deg = q_best(j) * 180.0f / M_PI;
+            Serial.printf("%.2f", angle_deg);
+            if(j < ARM_DOF - 1) Serial.print(", ");
+        }
+        Serial.println("]°");
+        
         // 检查速度约束
         if(i > 0) {
             VectorXd joint_vel = (trajectory.row(i) - trajectory.row(i-1)) / effective_sample_time;
@@ -245,6 +284,9 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
         Serial.println("错误: 轨迹中存在违反动力学约束的情况!");
         throw std::runtime_error("Dynamic constraints violated in the trajectory");
     }
+    
+    // 平滑轨迹中的角度突变
+    smoothJointTrajectory(trajectory, 60.0);
     
     Serial.println("笛卡尔直线轨迹规划完成");
 }
@@ -336,18 +378,48 @@ void TrajectoryPlanner::planCartesianArc(const Matrix4d& T_start, const Matrix4d
         // 求解逆运动学
         VectorXd q_current;
         if(i == 0) {
-            VectorXd q0 = VectorXd::Zero(ARM_DOF);
-            kinematics.inverseKinematics(T_current, q0, q_current);
+            // 对于第一个点，必须严格使用预定义的非奇异参考配置
+            VectorXd reference_config(ARM_DOF);
+            reference_config << 0 * M_PI/180.0, 30 * M_PI/180.0, 0 * M_PI/180.0, 
+                             60 * M_PI/180.0, 0 * M_PI/180.0, 45 * M_PI/180.0, 
+                             0 * M_PI/180.0;
+                             
+            // 打印参考配置信息以便调试
+            Serial.println("圆弧轨迹使用无奇异参考配置作为初始点：");
+            for(int j = 0; j < ARM_DOF; j++) {
+                Serial.printf("  关节%d: %.2f度\n", j+1, reference_config(j) * 180.0/M_PI);
+            }
+            
+            bool success = kinematics.inverseKinematics(T_current, reference_config, q_current);
+            // 如果使用参考配置失败，输出警告但强制使用参考配置
+            if(!success) {
+                Serial.println("警告：圆弧轨迹中无奇异参考配置逆解失败！");
+                q_current = reference_config;
+            }
         } else {
             kinematics.inverseKinematics(T_current, trajectory.row(i-1), q_current);
         }
         
         trajectory.row(i) = q_current;
         
+        // 输出当前计算出的轨迹点关节角度
+        Serial.printf("圆弧轨迹点 #%d (时间=%.2f秒) 角度: [", i+1, t);
+        for(int j = 0; j < ARM_DOF; j++) {
+            float angle_deg = q_current(j) * 180.0f / M_PI;
+            Serial.printf("%.2f", angle_deg);
+            if(j < ARM_DOF - 1) Serial.print(", ");
+        }
+        Serial.println("]°");
+        
         // 每计算一个点就输出信息
         Serial.printf("计算圆弧轨迹点: %d/%d, 时间=%.2f秒, 角度=%.2f, 位置=[%.3f, %.3f, %.3f]\n", 
                      i+1, n_points, t, current_angle * 180/M_PI, p_current(0), p_current(1), p_current(2));
     }
+    
+    // 平滑轨迹中的角度突变
+    smoothJointTrajectory(trajectory, 60.0);
+    
+    Serial.println("笛卡尔圆弧轨迹规划完成");
 }
 
 void TrajectoryPlanner::planPickAndPlace(const Matrix4d& T_current, const Matrix4d& pick_pos, const Matrix4d& place_pos,
@@ -678,4 +750,132 @@ void TrajectoryPlanner::planCompositeTrajectory(const std::vector<TrajectorySegm
         
         Serial.printf("实际轨迹点数: %d (小于预期的 %d)\n", current_point, sum_points);
     }
+    
+    // 平滑轨迹中的角度突变
+    smoothJointTrajectory(trajectory, 60.0);
+    
+    Serial.printf("实际轨迹点数: %d (小于预期的 %d)\n", current_point, sum_points);
+}
+
+// 改进：全面检测和修复轨迹中的角度突变
+void TrajectoryPlanner::smoothJointTrajectory(MatrixXd& trajectory, double angle_threshold) {
+    if (trajectory.rows() <= 1) {
+        return; // 轨迹点太少，无需平滑
+    }
+    
+    // 角度阈值（默认为60度，即约1.05弧度）
+    double rad_threshold = angle_threshold * M_PI / 180.0;
+    
+    Serial.printf("开始平滑轨迹: 轨迹点数=%d, 角度阈值=%.1f度\n", trajectory.rows(), angle_threshold);
+    
+    int total_corrections = 0;
+
+    // 对所有关节进行平滑处理
+    for (int joint = 0; joint < ARM_DOF; joint++) {
+        // 第一遍：检测大角度突变，并使用2π跳变修正
+        for (int i = 1; i < trajectory.rows(); i++) {
+            // 当前角度与前一个角度
+            double prev_angle = trajectory(i-1, joint);
+            double curr_angle = trajectory(i, joint);
+            
+            // 计算角度差
+            double angle_diff = curr_angle - prev_angle;
+            
+            // 检查是否为2π跳变（超过330度的变化，接近2π）
+            if (fabs(angle_diff) > (330 * M_PI / 180.0)) {
+                // 2π跳变修正
+                if (angle_diff > 0) {
+                    trajectory(i, joint) = curr_angle - 2*M_PI;
+                } else {
+                    trajectory(i, joint) = curr_angle + 2*M_PI;
+                }
+                
+                Serial.printf("修正2π跳变: 关节%d, 点%d, 从%.2f°到%.2f°\n", 
+                          joint+1, i, curr_angle*180/M_PI, trajectory(i, joint)*180/M_PI);
+                total_corrections++;
+            }
+        }
+        
+        // 第二遍：检测关节限位附近的突变
+        double joint_limit = 2.094; // 约120度的弧度表示
+        
+        for (int i = 1; i < trajectory.rows(); i++) {
+            double prev_angle = trajectory(i-1, joint);
+            double curr_angle = trajectory(i, joint);
+            double angle_diff = curr_angle - prev_angle;
+            
+            // 仅处理超过阈值的角度变化
+            if (fabs(angle_diff) > rad_threshold) {
+                Serial.printf("检测到角度突变: 关节%d, 点%d, 角度从%.2f°到%.2f°, 差值%.2f°\n", 
+                          joint+1, i, prev_angle*180/M_PI, curr_angle*180/M_PI, angle_diff*180/M_PI);
+                
+                // 情况1: 从接近正限位跳变到接近负限位
+                if (prev_angle > (joint_limit*0.8) && curr_angle < (-joint_limit*0.8)) {
+                    double adjusted_angle = curr_angle + 2*joint_limit;
+                    // 确保调整后的角度不超过正限位
+                    if (adjusted_angle <= joint_limit) {
+                        trajectory(i, joint) = adjusted_angle;
+                        Serial.printf("  修正限位突变: %.2f° -> %.2f° (等效正表示)\n", 
+                                  curr_angle*180/M_PI, adjusted_angle*180/M_PI);
+                        total_corrections++;
+                    }
+                }
+                // 情况2: 从接近负限位跳变到接近正限位
+                else if (prev_angle < (-joint_limit*0.8) && curr_angle > (joint_limit*0.8)) {
+                    double adjusted_angle = curr_angle - 2*joint_limit;
+                    // 确保调整后的角度不低于负限位
+                    if (adjusted_angle >= -joint_limit) {
+                        trajectory(i, joint) = adjusted_angle;
+                        Serial.printf("  修正限位突变: %.2f° -> %.2f° (等效负表示)\n", 
+                                  curr_angle*180/M_PI, adjusted_angle*180/M_PI);
+                        total_corrections++;
+                    }
+                }
+            }
+        }
+    }
+    
+    // 第三遍：进行平滑过渡处理，减小仍然存在的较大角度变化
+    for (int joint = 0; joint < ARM_DOF; joint++) {
+        for (int i = 1; i < trajectory.rows()-1; i++) {
+            double prev_angle = trajectory(i-1, joint);
+            double curr_angle = trajectory(i, joint);
+            double next_angle = trajectory(i+1, joint);
+            
+            double diff1 = fabs(curr_angle - prev_angle);
+            double diff2 = fabs(next_angle - curr_angle);
+            
+            // 如果当前点与前后点都有较大差异，可能是孤立的异常点
+            if (diff1 > rad_threshold && diff2 > rad_threshold) {
+                // 使用线性插值替换
+                double avg_angle = (prev_angle + next_angle) / 2.0;
+                trajectory(i, joint) = avg_angle;
+                Serial.printf("平滑孤立点: 关节%d, 点%d, 从%.2f°到%.2f°\n", 
+                          joint+1, i, curr_angle*180/M_PI, avg_angle*180/M_PI);
+                total_corrections++;
+            }
+        }
+    }
+    
+    // 第四遍：确保整个轨迹的连续性，防止连续性问题
+    for (int joint = 0; joint < ARM_DOF; joint++) {
+        // 使用滑动窗口平均（如果需要）来平滑仍然过大的角度变化
+        for (int i = 2; i < trajectory.rows() - 2; i++) {
+            double curr_angle = trajectory(i, joint);
+            double prev_diff = fabs(curr_angle - trajectory(i-1, joint));
+            double next_diff = fabs(trajectory(i+1, joint) - curr_angle);
+            
+            // 如果仍有较大变化，使用5点滑动窗口平均进一步平滑
+            if (prev_diff > rad_threshold * 0.7 || next_diff > rad_threshold * 0.7) {
+                double avg = (trajectory(i-2, joint) + trajectory(i-1, joint) + curr_angle + 
+                             trajectory(i+1, joint) + trajectory(i+2, joint)) / 5.0;
+                trajectory(i, joint) = avg;
+                Serial.printf("窗口平均: 关节%d, 点%d, 从%.2f°到%.2f°\n", 
+                          joint+1, i, curr_angle*180/M_PI, avg*180/M_PI);
+                total_corrections++;
+            }
+        }
+    }
+    
+    Serial.printf("轨迹平滑完成: 总共修正了%d处角度突变\n", total_corrections);
 }

@@ -1,5 +1,6 @@
 #include "PS2Controller.h"
 #include "ServoControl.h" // 这个是必要的，因为使用了舵机控制函数
+#include <Arduino.h>
 
 // 实例化全局对象
 PS2Controller ps2Controller;
@@ -20,14 +21,6 @@ PS2Controller::PS2Controller() {
     // 初始化轨迹相关变量
     isTrajectoryRunning = false;
     trajectoryExecutor = nullptr;
-    
-    // 初始化轨迹记录变量
-    trajectoryPointCount = 0;
-    for (int i = 0; i < MAX_TRAJECTORY_POINTS; i++) {
-        for (int j = 0; j < 7; j++) {
-            trajectoryJointAngles[i][j] = 0;
-        }
-    }
 }
 
 void PS2Controller::init() {
@@ -106,10 +99,8 @@ void PS2Controller::update() {
         // 检测方框键按下，输出轨迹记录矩阵
         if (ps2x.ButtonPressed(PSB_SQUARE)) {
             Serial.println("方框键按下，输出关节角度矩阵");
-            // 先记录当前关节角度
-            recordCurrentJointAngles();
-            // 然后输出所有记录的关节角度矩阵
-            outputJointAnglesMatrix();
+            // 使用新的全局轨迹系统输出轨迹点
+            TrajectoryExecutor::outputTrajectoryMatrix();
         }
         
         // 检测三角键按下，启动搬运演示
@@ -121,17 +112,6 @@ void PS2Controller::update() {
         // 处理控制逻辑
         handleJointControl();
         handleGripper();
-        
-        // 如果轨迹执行器正在运行，记录当前关节角度
-        if (trajectoryExecutor != nullptr && !trajectoryExecutor->isTrajectoryFinished()) {
-            recordJointAngles();
-            
-            // 检查轨迹是否已执行完成
-            if (trajectoryExecutor->isTrajectoryFinished()) {
-                isTrajectoryRunning = false;
-                Serial.println("轨迹执行完成，共记录角度点数: " + String(trajectoryPointCount));
-            }
-        }
     }
 }
 
@@ -335,8 +315,8 @@ void PS2Controller::handleDemoPickPlace() {
     if (trajectoryExecutor != nullptr) {
         Serial.println("启动搬运演示：从右侧工作台到左侧工作台");
         
-        // 在执行新轨迹前重置关节角度记录
-        resetJointAngleRecords();
+        // 在执行新轨迹前重置全局轨迹点记录
+        TrajectoryExecutor::resetRecordedPoints();
         
         if (trajectoryExecutor->executeCommand(cmd)) {
             isTrajectoryRunning = true;
@@ -347,65 +327,4 @@ void PS2Controller::handleDemoPickPlace() {
     } else {
         Serial.println("轨迹执行器未初始化，无法执行搬运演示");
     }
-}
-
-// 记录当前关节角度
-void PS2Controller::recordJointAngles() {
-    // 确保数组不会越界
-    if (trajectoryPointCount < MAX_TRAJECTORY_POINTS) {
-        // 记录所有7个关节的当前角度
-        for (int i = 0; i < 7; i++) {
-            trajectoryJointAngles[trajectoryPointCount][i] = joints[i].currentPos;
-        }
-        trajectoryPointCount++;
-        
-        // 打印记录信息
-        Serial.printf("记录点 #%d: ", trajectoryPointCount);
-        for (int i = 0; i < 7; i++) {
-            Serial.printf("%d ", joints[i].currentPos);
-        }
-        Serial.println();
-    } else {
-        Serial.println("警告: 轨迹点数已达上限，无法继续记录");
-    }
-}
-
-// 输出记录的关节角度矩阵到串口
-void PS2Controller::outputJointAnglesMatrix() {
-    if (trajectoryPointCount == 0) {
-        Serial.println("没有记录的轨迹点数据");
-        return;
-    }
-    
-    Serial.println("\n=== 关节角度矩阵 ===");
-    // 列标题
-    Serial.println("点序号, 关节1, 关节2, 关节3, 关节4, 关节5, 关节6, 关节7");
-    
-    // 输出每一行数据
-    for (int i = 0; i < trajectoryPointCount; i++) {
-        Serial.printf("%d, ", i+1);
-        for (int j = 0; j < 7; j++) {
-            // 将脉冲值(0-1000)转换为角度值(0-240度)
-            float angleDeg = pulseToAngle(trajectoryJointAngles[i][j]);
-            // 计算相对于中值(120度)的偏差，范围为-120到120度
-            float relativeAngle = angleDeg - 120.0f;
-            // 输出相对角度值，保留两位小数
-            Serial.printf("%.2f", relativeAngle);
-            if (j < 6) Serial.print(", ");
-        }
-        Serial.println();
-    }
-    
-    Serial.println("=== 矩阵结束 ===\n");
-}
-
-// 重置关节角度记录
-void PS2Controller::resetJointAngleRecords() {
-    trajectoryPointCount = 0;
-    for (int i = 0; i < MAX_TRAJECTORY_POINTS; i++) {
-        for (int j = 0; j < 7; j++) {
-            trajectoryJointAngles[i][j] = 0;
-        }
-    }
-    Serial.println("重置关节角度记录点");
 }

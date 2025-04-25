@@ -8,7 +8,12 @@ ArmStatus armStatus;
 // 全局队列和状态变量
 QueueHandle_t servoCommandQueue;
 QueueHandle_t trajectoryCommandQueue;
+QueueHandle_t calcResultQueue = nullptr;  // 添加轨迹计算结果队列
+QueueHandle_t calcCommandQueue = nullptr; // 添加轨迹计算命令队列
 const int queueSize = 20;  // 队列大小
+
+// 轨迹计算起始时间
+unsigned long calcStartTime = 0;
 
 // 状态标志
 volatile bool isCommandExecuting = false;
@@ -116,10 +121,11 @@ void trajectoryTask(void *parameter) {
                     
                     if(!isTrajectoryRunning && trajectoryExecutor != nullptr) {
                         Serial.println("执行示例拾放轨迹...");
+                        // 在执行前清空轨迹点记录
+                        TrajectoryExecutor::resetRecordedPoints();
                         if(trajectoryExecutor->executeExampleTrajectory()) {
                             isTrajectoryRunning = true;
                             Serial.println("示例轨迹执行开始");
-                            // 显示当前任务状态
                         } else {
                             Serial.println("示例轨迹执行失败");
                             displayErrorMessage("示例轨迹失败");
@@ -135,6 +141,8 @@ void trajectoryTask(void *parameter) {
                    cmdBuffer.startsWith("PICK_PLACE")) {
                     
                     if(!isTrajectoryRunning && trajectoryExecutor != nullptr) {
+                        // 在执行前清空轨迹点记录
+                        TrajectoryExecutor::resetRecordedPoints();
                         TrajectoryCommand cmd;
                         if(trajectoryExecutor->parseCommand(cmdBuffer, cmd)) {
                             if(trajectoryExecutor->executeCommand(cmd)) {
@@ -158,13 +166,27 @@ void trajectoryTask(void *parameter) {
         
         // 更新轨迹执行
         if(isTrajectoryRunning && trajectoryExecutor != nullptr) {
+            // 添加明确的调试输出
+            static unsigned long lastDebugTime = 0;
+            unsigned long currentTime = millis();
+            if(currentTime - lastDebugTime > 1000) {  // 每秒输出一次调试信息
+                Serial.printf("[TRAJ_TASK] 正在执行轨迹，currentPoint=%d, isExecuting=%d\n", 
+                             trajectoryExecutor->getCurrentPoint(),
+                             trajectoryExecutor->isExecuting() ? 1 : 0);
+                lastDebugTime = currentTime;
+            }
+            
+            // 执行更新
             trajectoryExecutor->update();
             
             // 检查轨迹是否完成
             if(trajectoryExecutor->isTrajectoryFinished()) {
                 isTrajectoryRunning = false;
                 Serial.println("轨迹执行完成");
-                // 恢复默认显示
+                
+                // 输出轨迹点数据
+                Serial.println("输出轨迹记录:");
+                TrajectoryExecutor::outputTrajectoryMatrix();
             }
         }
         
@@ -172,415 +194,302 @@ void trajectoryTask(void *parameter) {
     }
 }
 
-// 轨迹计算任务 - 运行在单独的核心上处理复杂计算
+// 修改轨迹计算任务
 void trajectoryCalculationTask(void *parameter) {
-  // 初始化任务
-  Serial.println("轨迹计算任务已启动");
-  
-  // 禁用当前任务的看门狗以避免复杂计算导致超时
-  esp_task_wdt_delete(NULL);
-  
-  // 创建命令通信通道
-  static QueueHandle_t calcCommandQueue = xQueueCreate(1, sizeof(TrajectoryCommand));
-  static QueueHandle_t calcResultQueue = xQueueCreate(1, sizeof(bool));
-  
-  // 等待TrajectoryExecutor初始化完成
-  while(trajectoryExecutor == nullptr) {
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
-  
-  // 给外部代码设置队列引用
-  trajectoryExecutor->setCalculationQueues(calcCommandQueue, calcResultQueue);
-  
-  // 用于安全保护的额外变量
-  int retryCount = 0;
-  const int maxRetries = 3;
-  
-  TrajectoryCommand cmd;
-  while(true) {
-    // 等待计算命令
-    if(xQueueReceive(calcCommandQueue, &cmd, portMAX_DELAY) == pdTRUE) {
-      bool success = false;
-      
-      try {
-        // 检查可用内存
-        size_t freeHeap = ESP.getFreeHeap();
-        if (freeHeap < 30000) {  // 确保至少有30KB可用内存
-          Serial.printf("警告: 内存不足 (%d 字节)，可能导致计算失败\n", freeHeap);
-          displayErrorMessage("内存不足，无法计算");
-          throw std::runtime_error("内存不足");
-        }
-        
-        Serial.println("开始计算轨迹...");
-        
-        // 首先，将机械臂移动到无奇异初始位置
-        displayProgressMessage("准备运动", 0);
-        
-        Serial.println("在轨迹规划前，先将机械臂移动到无奇异初始位置");
-        if (!trajectoryExecutor->moveToSafePose()) {
-          Serial.println("错误: 无法移动到安全初始位置");
-          displayErrorMessage("无法移动到安全位置");
-          throw std::runtime_error("无法移动到安全初始位置");
-        }
-        
-        // 移动完成后等待一小段时间确保机械臂稳定
-        vTaskDelay(pdMS_TO_TICKS(2000)); // 增加等待时间到2秒，确保舵机稳定
-        Serial.println("机械臂已到达安全初始位置，开始轨迹计算");
-        
-        // 每个复杂计算步骤后让出CPU时间
-        ESP.getFreeHeap(); // 触发垃圾回收
-        vTaskDelay(1); // 让出CPU时间
-
-        // 显示进度初始化
-        displayProgressMessage("轨迹计算", 10);
-        unsigned long startTime = millis();
-        
-        // 使用try-catch保护所有Eigen操作
-        Matrix4d current_pose = Matrix4d::Identity();
-        VectorXd current_q;
-        
-        // 获取当前关节角和显示进度 - 从机械臂状态直接读取，而不是从默认值
-        try {
-          current_q = trajectoryExecutor->getCurrentJointAngles();
-          
-          // 确保关节角有效，而不是全零
-          bool hasNonZero = false;
-          for(int i = 0; i < current_q.size(); i++) {
-            if(abs(current_q(i)) > 0.001) {
-              hasNonZero = true;
-              break;
-            }
-          }
-          
-          if(!hasNonZero) {
-            Serial.println("警告: 当前关节角度全部为零或接近零，可能未正确获取");
-            // 使用 moveToSafePose 中设置的关节角度作为备选
-            current_q << 0.0, M_PI/6, 0.0, M_PI/3, 0.0, M_PI/4, 0.0;
-          }
-          
-          Serial.println("当前关节角度 (弧度):");
-          for(int i = 0; i < current_q.size(); i++) {
-            Serial.printf("  关节%d: %.4f\n", i, current_q(i));
-          }
-          
-          displayProgressMessage("获取当前姿态", 20);
-          vTaskDelay(1); // 让出CPU时间
-        } catch (const std::exception& e) {
-          Serial.printf("获取关节角度异常: %s\n", e.what());
-          throw;
-        }
-        
-        // 检查向量维度以避免断言错误
-        if(current_q.size() != ARM_DOF) {
-          Serial.printf("错误: 关节角向量大小错误 (%d, 应为 %d)\n", current_q.size(), ARM_DOF);
-          throw std::runtime_error("关节角向量大小错误");
-        }
-        
-        // 计算当前位姿 - 安全包装
-        try {
-          if(!trajectoryExecutor->getKinematics().forwardKinematics(current_q, current_pose)) {
-            throw std::runtime_error("正向运动学计算失败");
-          }
-          
-          // 打印当前位姿信息，用于调试
-          Vector3d position = current_pose.block<3,1>(0,3);
-          Serial.printf("当前末端位置: [%.3f, %.3f, %.3f]\n", 
-                        position(0), position(1), position(2));
-          vTaskDelay(1); // 让出CPU时间
-        } catch (const std::exception& e) {
-          Serial.printf("正向运动学异常: %s\n", e.what());
-          throw;
-        }
-        
-        // 进度显示更新
-        displayProgressMessage("运动学分析", 30);
-        
-        // 获取轨迹规划器引用
-        TrajectoryPlanner& planner = trajectoryExecutor->getPlanner();
-        
-        // 内存分配前检查
-        freeHeap = ESP.getFreeHeap();
-        Serial.printf("内存状态: 空闲堆: %d 字节\n", freeHeap);
-        
-        // 创建轨迹存储容器
-        MatrixXd trajectory;
-        VectorXd timePoints;
-        
-        // 进度显示更新
-        displayProgressMessage("准备计算轨迹", 40);
-        vTaskDelay(1); // 让出CPU时间
-        
-        // 轨迹点计数变量
-        int calculatedPoints = 0;
-        int estimatedTotalPoints = 0;
-        
-        // 获取最大点数限制
-        int maxPoints = planner.getMaxPoints();
-        
-        // 根据命令类型规划轨迹 - 每个部分都被try-catch保护
-        try {
-          // 正确估算总点数 (基于持续时间和最大点数限制)
-          switch(cmd.type) {
-            case TrajectoryCommandType::JOINT_SPACE: {
-              // 检查目标关节角向量尺寸
-              if(cmd.jointAngles.size() != ARM_DOF) {
-                throw std::runtime_error("目标关节角向量大小错误");
-              }
-              
-              // 估算实际会生成的点数
-              estimatedTotalPoints = std::min(maxPoints, (int)ceil(cmd.duration / 0.01) + 1);
-              
-              // 进度显示更新
-              displayProgressWithPoints("计算关节轨迹", 40, 0, estimatedTotalPoints);
-              
-              // 在耗时计算之前添加短暂延迟让出CPU
-              vTaskDelay(1);
-              
-              planner.planJointTrajectory(current_q, cmd.jointAngles,
-                                        cmd.duration, trajectory, timePoints);
-              
-              // 获取计算出的实际点数
-              calculatedPoints = trajectory.rows();
-              
-              // 进度显示更新
-              displayProgressWithPoints("关节轨迹完成", 70, calculatedPoints, calculatedPoints);
-              vTaskDelay(1); // 让出CPU时间
-              break;
-            }
-            
-            case TrajectoryCommandType::LINE: {
-              // 创建目标位姿矩阵
-              Matrix4d target_pose = Matrix4d::Identity();
-              Matrix3d R_target = trajectoryExecutor->getKinematics().eulerToRotation(cmd.orientation);
-              target_pose.block<3,3>(0,0) = R_target;
-              target_pose.block<3,1>(0,3) = cmd.position;
-              
-              // 打印起点终点，用于调试
-              Vector3d start_pos = current_pose.block<3,1>(0,3);
-              Vector3d end_pos = cmd.position;
-              Serial.println("直线轨迹规划:");
-              Serial.printf("起点位置: [%.3f, %.3f, %.3f]\n", 
-                          start_pos(0), start_pos(1), start_pos(2));
-              Serial.printf("终点位置: [%.3f, %.3f, %.3f]\n", 
-                          end_pos(0), end_pos(1), end_pos(2));
-              
-              // 计算路径长度
-              double path_length = (end_pos - start_pos).norm();
-              Serial.printf("路径长度: %.3f 米\n", path_length);
-              
-              // 估算实际会生成的点数
-              estimatedTotalPoints = std::min(maxPoints, (int)ceil(cmd.duration / 0.01) + 1);
-              
-              // 进度显示更新
-              displayProgressWithPoints("计算直线轨迹", 40, 0, estimatedTotalPoints);
-              
-              // 在耗时计算之前添加短暂延迟让出CPU
-              vTaskDelay(1);
-              
-              planner.planCartesianLine(current_pose, target_pose,
-                                      cmd.duration, trajectoryExecutor->getKinematics(),
-                                      trajectory, timePoints);
-              
-              // 获取计算出的实际点数
-              calculatedPoints = trajectory.rows();
-              
-              // 进度显示更新
-              displayProgressWithPoints("直线轨迹完成", 70, calculatedPoints, calculatedPoints);
-              vTaskDelay(1); // 让出CPU时间
-              break;
-            }
-            
-            case TrajectoryCommandType::ARC: {
-              // 创建目标位姿矩阵
-              Matrix4d target_pose = Matrix4d::Identity();
-              Matrix3d R_target = trajectoryExecutor->getKinematics().eulerToRotation(cmd.orientation);
-              target_pose.block<3,3>(0,0) = R_target;
-              target_pose.block<3,1>(0,3) = cmd.position;
-              
-              // 打印信息用于调试
-              Vector3d start_pos = current_pose.block<3,1>(0,3);
-              Vector3d end_pos = cmd.position;
-              Vector3d via_pos = cmd.viaPoint;
-              Serial.println("弧线轨迹规划:");
-              Serial.printf("起点位置: [%.3f, %.3f, %.3f]\n", 
-                          start_pos(0), start_pos(1), start_pos(2));
-              Serial.printf("终点位置: [%.3f, %.3f, %.3f]\n", 
-                          end_pos(0), end_pos(1), end_pos(2));
-              Serial.printf("经过点位置: [%.3f, %.3f, %.3f]\n", 
-                          via_pos(0), via_pos(1), via_pos(2));
-              
-              // 估算实际会生成的点数
-              estimatedTotalPoints = std::min(maxPoints, (int)ceil(cmd.duration / 0.01) + 1);
-              
-              // 进度显示更新
-              displayProgressWithPoints("计算弧线轨迹", 40, 0, estimatedTotalPoints);
-              
-              // 在耗时计算之前添加短暂延迟让出CPU
-              vTaskDelay(1);
-              
-              planner.planCartesianArc(current_pose, target_pose,
-                                     cmd.viaPoint, cmd.duration,
-                                     trajectoryExecutor->getKinematics(),
-                                     trajectory, timePoints);
-              
-              // 获取计算出的实际点数
-              calculatedPoints = trajectory.rows();
-              
-              // 进度显示更新
-              displayProgressWithPoints("弧线轨迹完成", 70, calculatedPoints, calculatedPoints);
-              vTaskDelay(1); // 让出CPU时间
-              break;
-            }
-            
-            case TrajectoryCommandType::PICK_PLACE: {
-              // 为Pick&Place特殊处理
-              // 由于它是由6个子轨迹段组成的复合轨迹，我们需要更准确地估算点数
-              
-              // 安全地创建抓取位姿矩阵
-              Matrix4d pick_pose = Matrix4d::Identity();
-              Matrix3d R_pick;
-              
-              try {
-                R_pick = trajectoryExecutor->getKinematics().eulerToRotation(cmd.orientation);
-                pick_pose.block<3,3>(0,0) = R_pick;
-                pick_pose.block<3,1>(0,3) = cmd.position;
-              } catch (const std::exception& e) {
-                Serial.printf("创建抓取矩阵异常: %s\n", e.what());
-                throw;
-              }
-              
-              // 打印拾取放置信息
-              Vector3d current_pos = current_pose.block<3,1>(0,3);
-              Vector3d pick_pos = cmd.position;
-              Vector3d place_pos = cmd.viaPoint;
-              Serial.println("拾放轨迹规划:");
-              Serial.printf("当前位置: [%.3f, %.3f, %.3f]\n", 
-                          current_pos(0), current_pos(1), current_pos(2));
-              Serial.printf("拾取位置: [%.3f, %.3f, %.3f]\n", 
-                          pick_pos(0), pick_pos(1), pick_pos(2));
-              Serial.printf("放置位置: [%.3f, %.3f, %.3f]\n", 
-                          place_pos(0), place_pos(1), place_pos(2));
-              Serial.printf("抬升高度: %.3f 米\n", cmd.liftHeight);
-              
-              // 估算总点数 - 复合轨迹通常限制在max_points内
-              estimatedTotalPoints = maxPoints;
-              
-              // 进度显示更新
-              displayProgressWithPoints("创建拾取矩阵", 40, 0, estimatedTotalPoints);
-              
-              // 安全地创建放置位姿矩阵
-              Matrix4d place_pose = Matrix4d::Identity();
-              try {
-                place_pose.block<3,3>(0,0) = R_pick;  // 保持相同姿态
-                place_pose.block<3,1>(0,3) = cmd.viaPoint;
-              } catch (const std::exception& e) {
-                Serial.printf("创建放置矩阵异常: %s\n", e.what());
-                throw;
-              }
-              
-              // 进度显示更新
-              displayProgressWithPoints("计算拾放轨迹", 50, 0, estimatedTotalPoints);
-              
-              // 轨迹计算前再次检查内存
-              freeHeap = ESP.getFreeHeap();
-              if (freeHeap < 15000) {  // 确保至少有15KB可用内存进行计算
-                throw std::runtime_error("内存不足，无法计算拾放轨迹");
-              }
-              
-              // 在耗时计算之前添加短暂延迟让出CPU
-              vTaskDelay(1);
-              
-              planner.planPickAndPlace(current_pose, pick_pose, place_pose,
-                                     cmd.liftHeight, cmd.duration,
-                                     trajectoryExecutor->getKinematics(),
-                                     trajectory, timePoints);
-              
-              // 获取计算出的实际点数
-              calculatedPoints = trajectory.rows();
-              
-              // 进度显示更新
-              displayProgressWithPoints("拾放轨迹完成", 70, calculatedPoints, calculatedPoints);
-              vTaskDelay(1); // 让出CPU时间
-              break;
-            }
-          }
-        } catch (const std::exception& e) {
-          Serial.printf("轨迹计算步骤异常: %s\n", e.what());
-          throw;
-        }
-        
-        // 检查计算结果的有效性
-        if (trajectory.rows() <= 0 || timePoints.size() <= 0) {
-          throw std::runtime_error("计算结果无效: 轨迹点数为零");
-        }
-        
-        // 进度显示更新
-        displayProgressWithPoints("验证轨迹", 80, calculatedPoints, calculatedPoints);
-        
-        Serial.printf("轨迹计算完成: %d 个点\n", trajectory.rows());
-        unsigned long calcTime = millis() - startTime;
-        Serial.printf("计算耗时: %lu 毫秒\n", calcTime);
-        
-        // 进度显示更新
-        displayProgressWithPoints("设置轨迹", 90, calculatedPoints, calculatedPoints);
-        vTaskDelay(1); // 让出CPU时间
-        
-        // 将结果发送回轨迹执行器 - 安全包装
-        try {
-          success = trajectoryExecutor->setTrajectory(trajectory, timePoints);
-          if (!success) {
-            throw std::runtime_error("设置轨迹失败");
-          }
-        } catch (const std::exception& e) {
-          Serial.printf("设置轨迹异常: %s\n", e.what());
-          throw;
-        }
-        
-        // 进度显示更新 - 100%完成
-        displayProgressWithPoints("计算完成", 100, calculatedPoints, calculatedPoints);
-        
-        // 重置重试计数
-        retryCount = 0;
-      }
-      catch(const std::exception& e) {
-        Serial.print("轨迹计算异常: ");
-        Serial.println(e.what());
-        // 显示错误信息
-        displayErrorMessage(String("计算错误: ") + e.what());
-        success = false;
-        
-        // 异常发生时，等待更长时间恢复
-        vTaskDelay(pdMS_TO_TICKS(500));
-        
-        // 墨加重试计数
-        retryCount++;
-        if (retryCount >= maxRetries) {
-          // 如果多次重试失败，尝试释放内存
-          Serial.println("多次计算失败，正在尝试释放内存...");
-          // 强制进行一次GC (如果有的话)
-          ESP.getFreeHeap();
-          vTaskDelay(pdMS_TO_TICKS(1000)); // 等待系统稳定
-          retryCount = 0;
-        }
-      }
-      catch(...) {
-        Serial.println("轨迹计算发生未知异常");
-        // 显示错误信息
-        displayErrorMessage("未知计算错误");
-        success = false;
-        
-        // 异常发生时，等待更长时间恢复
-        vTaskDelay(pdMS_TO_TICKS(1000));
-      }
-      
-      // 返回计算结果
-      xQueueSend(calcResultQueue, &success, 0);
-      vTaskDelay(pdMS_TO_TICKS(100)); // 留出时间处理结果
-    } else {
-      // 即使没有任务也要让出CPU时间
-      vTaskDelay(1);
+    // 获取队列句柄
+    QueueHandle_t commandQueue = (QueueHandle_t)parameter;
+    
+    // 轨迹和结果队列
+    if(calcResultQueue == nullptr) {
+        Serial.println("错误: 结果队列未创建");
+        vTaskDelete(nullptr);
+        return;
     }
-  }
+    
+    // 初始化工作标志
+    bool isWorking = false;
+    
+    Serial.println("轨迹计算任务已启动");
+    
+    while(1) {
+        // 等待计算命令
+        TrajectoryCommand cmd;
+        
+        if(xQueueReceive(commandQueue, &cmd, portMAX_DELAY) == pdTRUE) {
+            isWorking = true;
+            // 记录开始时间
+            calcStartTime = millis();
+            Serial.println("开始计算轨迹...");
+            
+            // 输出进度
+            Serial.println("进度: 准备运动 0%");
+            
+            // 获取轨迹执行器
+            if(trajectoryExecutor == nullptr) {
+                Serial.println("错误: 轨迹执行器未初始化");
+                bool result = false;
+                xQueueSend(calcResultQueue, &result, 0);
+                isWorking = false;
+                continue;
+            }
+            
+            // 先清空之前记录的轨迹点
+            TrajectoryExecutor::resetRecordedPoints();
+            
+            // 获取轨迹规划器和运动学引用
+            TrajectoryPlanner& planner = trajectoryExecutor->getPlanner();
+            RobotKinematics& kinematics = trajectoryExecutor->getKinematics();
+            
+            // 在轨迹规划前，先将机械臂移动到无奇异初始位置
+            Serial.println("在轨迹规划前，先将机械臂移动到无奇异初始位置");
+            trajectoryExecutor->moveToSafePose();
+            Serial.println("机械臂已到达安全初始位置，开始轨迹计算");
+            
+            MatrixXd trajectory;
+            VectorXd timePoints;
+            bool success = false;
+            
+            // 输出进度
+            Serial.println("进度: 轨迹计算 10%");
+            
+            // 获取当前关节角度
+            VectorXd current_q = trajectoryExecutor->getCurrentJointAngles();
+            
+            // 输出调试信息
+            Serial.println("当前关节角度 (弧度):");
+            for(int i = 0; i < ARM_DOF; i++) {
+                Serial.printf("  关节%d: %.4f\n", i, current_q(i));
+            }
+            
+            // 输出进度
+            Serial.println("进度: 获取当前姿态 20%");
+            
+            // 计算当前位置的正向运动学
+            Matrix4d current_pose;
+            if(!kinematics.forwardKinematics(current_q, current_pose)) {
+                Serial.println("错误: 无法计算当前位置的正向运动学");
+                bool result = false;
+                xQueueSend(calcResultQueue, &result, 0);
+                isWorking = false;
+                continue;
+            }
+            
+            // 输出调试信息
+            Vector3d current_pos = current_pose.block<3,1>(0,3);
+            Serial.printf("当前末端位置: [%.3f, %.3f, %.3f]\n", 
+                         current_pos(0), current_pos(1), current_pos(2));
+            
+            // 输出进度
+            Serial.println("进度: 运动学分析 30%");
+            
+            // 输出内存状态
+            Serial.printf("内存状态: 空闲堆: %d 字节\n", xPortGetFreeHeapSize());
+            
+            // 输出进度
+            Serial.println("进度: 准备计算轨迹 40%");
+            
+            // 根据命令类型计算轨迹
+            success = false;
+            
+            if(cmd.type == TrajectoryCommandType::JOINT_SPACE) {
+                // 计算关节空间轨迹
+                planner.planJointTrajectory(current_q, cmd.jointAngles, 
+                                          cmd.duration, trajectory, timePoints);
+                success = (trajectory.rows() > 0);
+            }
+            else if(cmd.type == TrajectoryCommandType::LINE) {
+                // 创建目标位姿矩阵
+                Matrix4d target_pose = Matrix4d::Identity();
+                
+                // 根据RPY角计算旋转矩阵
+                double roll = cmd.orientation(0);
+                double pitch = cmd.orientation(1);
+                double yaw = cmd.orientation(2);
+                
+                Matrix3d rotation = Matrix3d::Identity();
+                double cr = cos(roll), sr = sin(roll);
+                double cp = cos(pitch), sp = sin(pitch);
+                double cy = cos(yaw), sy = sin(yaw);
+                
+                rotation(0,0) = cy*cp;    rotation(0,1) = cy*sp*sr-sy*cr;    rotation(0,2) = cy*sp*cr+sy*sr;
+                rotation(1,0) = sy*cp;    rotation(1,1) = sy*sp*sr+cy*cr;    rotation(1,2) = sy*sp*cr-cy*sr;
+                rotation(2,0) = -sp;      rotation(2,1) = cp*sr;             rotation(2,2) = cp*cr;
+                
+                // 设置目标位置和姿态
+                target_pose.block<3,3>(0,0) = rotation;
+                target_pose.block<3,1>(0,3) = cmd.position;
+                
+                // 计算直线轨迹
+                planner.planCartesianLine(current_pose, target_pose, 
+                                         cmd.duration, kinematics,
+                                         trajectory, timePoints);
+                success = (trajectory.rows() > 0);
+            }
+            else if(cmd.type == TrajectoryCommandType::ARC) {
+                // 创建目标位姿矩阵
+                Matrix4d target_pose = Matrix4d::Identity();
+                
+                // 根据RPY角计算旋转矩阵
+                double roll = cmd.orientation(0);
+                double pitch = cmd.orientation(1);
+                double yaw = cmd.orientation(2);
+                
+                Matrix3d rotation = Matrix3d::Identity();
+                double cr = cos(roll), sr = sin(roll);
+                double cp = cos(pitch), sp = sin(pitch);
+                double cy = cos(yaw), sy = sin(yaw);
+                
+                rotation(0,0) = cy*cp;    rotation(0,1) = cy*sp*sr-sy*cr;    rotation(0,2) = cy*sp*cr+sy*sr;
+                rotation(1,0) = sy*cp;    rotation(1,1) = sy*sp*sr+cy*cr;    rotation(1,2) = sy*sp*cr-cy*sr;
+                rotation(2,0) = -sp;      rotation(2,1) = cp*sr;             rotation(2,2) = cp*cr;
+                
+                // 设置目标位置和姿态
+                target_pose.block<3,3>(0,0) = rotation;
+                target_pose.block<3,1>(0,3) = cmd.position;
+                
+                // 计算圆弧轨迹
+                planner.planCartesianArc(current_pose, target_pose, 
+                                        cmd.viaPoint, cmd.duration, kinematics,
+                                        trajectory, timePoints);
+                success = (trajectory.rows() > 0);
+            }
+            else if(cmd.type == TrajectoryCommandType::PICK_PLACE) {
+                // 计算拾放轨迹
+                
+                // 输出轨迹参数信息
+                Serial.println("拾放轨迹规划:");
+                Serial.printf("当前位置: [%.3f, %.3f, %.3f]\n", 
+                             current_pos(0), current_pos(1), current_pos(2));
+                Serial.printf("拾取位置: [%.3f, %.3f, %.3f]\n", 
+                             cmd.position(0), cmd.position(1), cmd.position(2));
+                Serial.printf("放置位置: [%.3f, %.3f, %.3f]\n", 
+                             cmd.viaPoint(0), cmd.viaPoint(1), cmd.viaPoint(2));
+                Serial.printf("抬升高度: %.3f 米\n", cmd.liftHeight);
+                
+                // 创建拾取位姿矩阵
+                Matrix4d pick_pose = Matrix4d::Identity();
+                
+                // 根据RPY角计算拾取姿态的旋转矩阵
+                double roll = cmd.orientation(0);
+                double pitch = cmd.orientation(1);
+                double yaw = cmd.orientation(2);
+                
+                Matrix3d rotation = Matrix3d::Identity();
+                double cr = cos(roll), sr = sin(roll);
+                double cp = cos(pitch), sp = sin(pitch);
+                double cy = cos(yaw), sy = sin(yaw);
+                
+                rotation(0,0) = cy*cp;    rotation(0,1) = cy*sp*sr-sy*cr;    rotation(0,2) = cy*sp*cr+sy*sr;
+                rotation(1,0) = sy*cp;    rotation(1,1) = sy*sp*sr+cy*cr;    rotation(1,2) = sy*sp*cr-cy*sr;
+                rotation(2,0) = -sp;      rotation(2,1) = cp*sr;             rotation(2,2) = cp*cr;
+                
+                // 设置拾取位置和姿态
+                pick_pose.block<3,3>(0,0) = rotation;
+                pick_pose.block<3,1>(0,3) = cmd.position;
+                
+                // 创建放置位姿矩阵 (使用相同的姿态但不同的位置)
+                Matrix4d place_pose = pick_pose;
+                place_pose.block<3,1>(0,3) = cmd.viaPoint;
+                
+                // 先输出进度
+                Serial.println("进度: 创建拾取矩阵 40% (点数: 0/50)");
+                
+                // 再输出进度
+                Serial.println("进度: 计算拾放轨迹 50% (点数: 0/50)");
+                
+                // 计算拾放轨迹
+                planner.planPickAndPlace(current_pose, pick_pose, place_pose,
+                                        cmd.liftHeight, cmd.duration, kinematics,
+                                        trajectory, timePoints);
+                success = (trajectory.rows() > 0);
+            }
+            
+            // 更新进度
+            Serial.println("进度: 轨迹完成 70% (点数: " + 
+                         String(trajectory.rows()) + "/" + String(trajectory.rows()) + ")");
+            
+            // 验证轨迹
+            if(success) {
+                // 验证轨迹中的逆运动学解是否都有效
+                bool isValid = true;
+                for(int i = 0; i < trajectory.rows(); i++) {
+                    VectorXd q = trajectory.row(i);
+                    Matrix4d pose;
+                    if(!kinematics.forwardKinematics(q, pose)) {
+                        isValid = false;
+                        break;
+                    }
+                }
+                success = isValid;
+                
+                // 更新进度
+                Serial.println("进度: 验证轨迹 80% (点数: " + 
+                             String(trajectory.rows()) + "/" + String(trajectory.rows()) + ")");
+            }
+            
+            // 输出计算结果
+            if(success) {
+                Serial.println("轨迹计算完成: " + String(trajectory.rows()) + " 个点");
+                Serial.println("计算耗时: " + String(millis() - calcStartTime) + " 毫秒");
+                
+                // 更新进度
+                Serial.println("进度: 设置轨迹 90% (点数: " + 
+                             String(trajectory.rows()) + "/" + String(trajectory.rows()) + ")");
+                
+                // 重要修改：强制输出轨迹调试信息
+                Serial.println("轨迹点信息:");
+                for(int i = 0; i < min(5, (int)trajectory.rows()); i++) {
+                    Serial.printf("点 %d (%.2f秒): [", i+1, timePoints(i));
+                    for(int j = 0; j < ARM_DOF; j++) {
+                        Serial.printf("%.2f", trajectory(i, j) * 180.0 / M_PI);
+                        if(j < ARM_DOF-1) Serial.print(", ");
+                    }
+                    Serial.println("]°");
+                }
+                
+                // 重要: 计算完成后立即记录所有轨迹点
+                Serial.println("[TRAJ_CALC] 开始记录所有计算的轨迹点...");
+                for(int i = 0; i < trajectory.rows(); i++) {
+                    VectorXd angles = trajectory.row(i);
+                    // 调用记录函数
+                    Serial.printf("[TRAJ_CALC] 记录轨迹点 %d/%d, 时间=%.2f秒\n", 
+                                 i+1, trajectory.rows(), timePoints(i));
+                    trajectoryExecutor->recordTrajectoryPoint(angles);
+                    
+                    // 短暂延时确保记录完成
+                    if(i % 10 == 0) { // 每10个点延时一次，避免频繁延时
+                        vTaskDelay(pdMS_TO_TICKS(1));
+                    }
+                }
+                Serial.printf("[TRAJ_CALC] 已记录 %d 个轨迹点\n", trajectory.rows());
+                
+                // 将轨迹设置到执行器
+                if(!trajectoryExecutor->setTrajectory(trajectory, timePoints)) {
+                    Serial.println("错误: 无法设置轨迹数据");
+                    success = false;
+                } else {
+                    Serial.println("设置轨迹成功，发送成功状态到队列");
+                }
+                
+                // 发送结果
+                xQueueSend(calcResultQueue, &success, 0);
+                Serial.println("成功状态已发送到结果队列");
+                
+                // 更新进度
+                Serial.println("进度: 计算完成 100% (点数: " + 
+                             String(trajectory.rows()) + "/" + String(trajectory.rows()) + ")");
+            } else {
+                Serial.println("轨迹计算失败");
+                // 发送结果
+                xQueueSend(calcResultQueue, &success, 0);
+            }
+            
+            isWorking = false;
+        }
+        
+        // 短暂延时以避免占用过多CPU
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 // 创建并启动所有任务
@@ -589,10 +498,17 @@ void setupTasks() {
   servoCommandQueue = xQueueCreate(queueSize, sizeof(ServoCommand));
   trajectoryCommandQueue = xQueueCreate(queueSize, sizeof(TrajectoryCommand));
   
+  // 创建轨迹计算队列
+  calcCommandQueue = xQueueCreate(queueSize, sizeof(TrajectoryCommand));
+  calcResultQueue = xQueueCreate(queueSize, sizeof(bool));
+  
   // 创建轨迹执行器实例
   static TrajectoryPlanner planner;
   static RobotKinematics kinematics;
   trajectoryExecutor = new TrajectoryExecutor(planner, kinematics);
+  
+  // 重要：设置轨迹执行器的计算队列
+  trajectoryExecutor->setCalculationQueues(calcCommandQueue, calcResultQueue);
   
   // 设置PS2Controller的轨迹执行器引用
   ps2Controller.setTrajectoryExecutor(trajectoryExecutor);
@@ -602,7 +518,7 @@ void setupTasks() {
     trajectoryCalculationTask,  // 计算轨迹的专门任务
     "TrajCalcTask",            // 任务名称
     32768,                     // 超大堆栈大小(32K)
-    NULL,                      // 任务参数
+    calcCommandQueue,          // 任务参数，传递计算命令队列
     configMAX_PRIORITIES-1,    // 最高优先级
     NULL,                      // 任务句柄
     0                          // 运行的核心（Core 0）

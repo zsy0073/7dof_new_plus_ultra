@@ -28,6 +28,16 @@ struct ServoCommand {
 int angleToPulse(float angle);
 float pulseToAngle(int pulse);
 
+// 新增：轨迹规划角度和舵机物理角度之间的转换函数
+// 将轨迹规划角度(-120到+120度，0为中位)转换为舵机物理角度(0-240度)
+float trajAngleToServoAngle(float trajAngle);
+// 将舵机物理角度(0-240度)转换为轨迹规划角度(-120到+120度，0为中位)
+float servoAngleToTrajAngle(float servoAngle);
+// 直接将轨迹规划角度转换为舵机控制值
+int trajAngleToPulse(float trajAngle);
+// 直接将舵机控制值转换为轨迹规划角度
+float pulseToTrajAngle(int pulse);
+
 // 基本舵机控制函数
 void initServo();
 int calculateMoveTime(int distance);
@@ -44,5 +54,9 @@ void moveMultipleServos(LobotServo servoArray[], int servoCount, int moveTime);
 bool isServosReady();  // 检查所有舵机是否就绪
 void getCurrentJointAngles(float angles[7]);  // 获取当前关节角度（度）
 void setJointAngles(const float angles[7], int moveTime);  // 设置关节角度（度）
+
+// 新增：获取和设置轨迹规划角度（-120到+120度）
+void getCurrentTrajAngles(float angles[7]);  // 获取当前关节的轨迹规划角度
+void setTrajAngles(const float angles[7], int moveTime);  // 设置关节的轨迹规划角度
 
 #endif  // SERVO_CONTROL_H

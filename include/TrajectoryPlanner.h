@@ -64,6 +64,9 @@ public:
                         double lift_height, double move_time,
                         RobotKinematics& kinematics,
                         MatrixXd& trajectory, VectorXd& time_points);
+                        
+    // 平滑轨迹中的角度突变
+    void smoothJointTrajectory(MatrixXd& trajectory, double angle_threshold);
 
 private:
     double sample_time_;      // 采样时间间隔

@@ -1,10 +1,27 @@
 #include "TrajectoryExecutor.h"
+#include "PS2Controller.h" // 添加PS2Controller头文件
 #include <Arduino.h>
+
+// 引用外部定义的ps2Controller全局变量
+extern PS2Controller ps2Controller;
+
+// 全局轨迹存储实现
+TrajectoryPoint g_recordedPoints[MAX_TRAJECTORY_POINTS];
+int g_recordedPointCount = 0;
+SemaphoreHandle_t g_pointsMutex = NULL;
 
 TrajectoryExecutor::TrajectoryExecutor(TrajectoryPlanner& planner, RobotKinematics& kinematics)
     : planner_(planner), kinematics_(kinematics) {
     // 初始化当前关节角度为零
     current_angles_ = VectorXd::Zero(ARM_DOF);
+    
+    // 初始化全局轨迹点互斥锁
+    if (g_pointsMutex == NULL) {
+        g_pointsMutex = xSemaphoreCreateMutex();
+        if (g_pointsMutex == NULL) {
+            Serial.println("错误: 无法创建轨迹点互斥锁!");
+        }
+    }
 }
 
 bool TrajectoryExecutor::parseCommand(const String& cmdStr, TrajectoryCommand& cmd) {
@@ -65,7 +82,7 @@ bool TrajectoryExecutor::parseCommand(const String& cmdStr, TrajectoryCommand& c
             spaceIndex = params.indexOf(' ');
             if(spaceIndex == -1) return false;
             cmd.position(i) = params.substring(0, spaceIndex).toFloat();
-            params = params.substring(spaceIndex + 1);
+            params = params.substring(0, spaceIndex);
         }
         
         // 解析经过点
@@ -81,7 +98,7 @@ bool TrajectoryExecutor::parseCommand(const String& cmdStr, TrajectoryCommand& c
             spaceIndex = params.indexOf(' ');
             if(spaceIndex == -1) return false;
             cmd.orientation(i) = params.substring(0, spaceIndex).toFloat() * M_PI / 180.0;
-            params = params.substring(spaceIndex + 1);
+            params = params.substring(0, spaceIndex);
         }
         
         cmd.duration = params.toFloat();
@@ -185,9 +202,9 @@ bool TrajectoryExecutor::executeCommand(const TrajectoryCommand& cmd) {
     
     Serial.println("已发送轨迹计算命令，等待计算完成...");
     
-    // 等待结果 (最多5秒)
+    // 等待结果 - 增加超时时间到60秒，因为轨迹计算很耗时
     bool success = false;
-    if(xQueueReceive(calcResultQueue_, &success, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    if(xQueueReceive(calcResultQueue_, &success, pdMS_TO_TICKS(60000)) != pdTRUE) {
         Serial.println("错误: 等待轨迹计算结果超时");
         return false;
     }
@@ -209,12 +226,35 @@ void TrajectoryExecutor::sendToServos(const VectorXd& angles) {
     // 创建舵机批量控制数组
     LobotServo servoArray[7];
     
-    // 将弧度转换为控制值(0-1000)
+    // 将弧度转换为度，然后将轨迹规划角度转换为舵机控制值
+    bool hasLimitedAngles = false;
     for(int i = 0; i < 7; i++) {
-        float angle_deg = angles(i) * 180.0f / M_PI;
-        int pulse = angleToPulse(angle_deg);
+        // 将弧度转换为度
+        float traj_angle_deg = angles(i) * 180.0f / M_PI;
+        
+        // 检查轨迹规划角度范围（-120到+120度）
+        if (traj_angle_deg < -120.0f) {
+            Serial.printf("[警告] 执行时关节%d轨迹角度 %.2f° 小于最小值-120°，已限制\n", 
+                        i+1, traj_angle_deg);
+            traj_angle_deg = -120.0f;
+            hasLimitedAngles = true;
+        }
+        else if (traj_angle_deg > 120.0f) {
+            Serial.printf("[警告] 执行时关节%d轨迹角度 %.2f° 大于最大值+120°，已限制\n", 
+                        i+1, traj_angle_deg);
+            traj_angle_deg = 120.0f;
+            hasLimitedAngles = true;
+        }
+        
+        // 直接从轨迹规划角度转换为舵机控制值
+        int pulse = trajAngleToPulse(traj_angle_deg);
         servoArray[i].ID = jointServos[i];
         servoArray[i].Position = pulse;
+    }
+    
+    // 如果有角度被限制，输出总体警告
+    if (hasLimitedAngles) {
+        Serial.println("[警告] 执行轨迹点时，部分关节轨迹角度超出范围(-120到+120度)，已自动限制");
     }
     
     // 设置一个合理的移动时间(100ms)
@@ -225,7 +265,9 @@ void TrajectoryExecutor::sendToServos(const VectorXd& angles) {
 }
 
 void TrajectoryExecutor::update() {
-    if(!isExecuting_) return;
+    if(!isExecuting_) {
+        return;
+    }
     
     unsigned long currentTime = millis();
     float elapsedTime = (currentTime - startTime_) / 1000.0f;  // 转换为秒
@@ -233,6 +275,7 @@ void TrajectoryExecutor::update() {
     // 找到当前时间对应的轨迹点
     while(currentPoint_ < trajectory_.rows() && 
           timePoints_(currentPoint_) <= elapsedTime) {
+        
         // 发送关节角度给舵机
         VectorXd angles = trajectory_.row(currentPoint_);
         sendToServos(angles);
@@ -240,12 +283,19 @@ void TrajectoryExecutor::update() {
         // 更新当前关节角度
         current_angles_ = angles;
         
+        // 不再记录轨迹点，因为已经在计算阶段记录完毕
+        
+        Serial.printf("执行轨迹点 %d/%d, 时间=%.2f秒\n", 
+                     currentPoint_+1, trajectory_.rows(), timePoints_(currentPoint_));
+        
         currentPoint_++;
     }
     
     // 检查轨迹是否完成
     if(currentPoint_ >= trajectory_.rows()) {
         isExecuting_ = false;
+        Serial.println("轨迹已全部执行完成");
+        Serial.printf("已记录了 %d 个轨迹点，按方框键查看详细数据\n", g_recordedPointCount);
     }
 }
 
@@ -306,8 +356,12 @@ VectorXd TrajectoryExecutor::getCurrentJointAngles() const {
     for(int i = 0; i < ARM_DOF; i++) {
         // 从全局状态获取当前位置
         int pulse = armStatus.joints[i];
-        float angle_deg = pulseToAngle(pulse);
-        current_q(i) = angle_deg * M_PI / 180.0;
+        
+        // 将舵机控制值转换为轨迹规划角度（-120到+120度）
+        float traj_angle_deg = pulseToTrajAngle(pulse);
+        
+        // 将度转换为弧度
+        current_q(i) = traj_angle_deg * M_PI / 180.0;
     }
     
     // 注意：这里不能直接修改，因为方法是const修饰的
@@ -381,4 +435,141 @@ bool TrajectoryExecutor::executeExampleTrajectory() {
     
     // 执行命令
     return executeCommand(cmd);
+}
+
+// 记录轨迹点数据到全局存储 - 新方法实现
+void TrajectoryExecutor::recordTrajectoryPoint(const VectorXd& angles) {
+    // 检查互斥锁
+    if (g_pointsMutex == NULL) {
+        Serial.println("错误: 轨迹点互斥锁未初始化!");
+        return;
+    }
+    
+    // 尝试获取互斥锁
+    if (xSemaphoreTake(g_pointsMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        Serial.println("错误: 无法获取轨迹点互斥锁!");
+        return;
+    }
+    
+    // 确保数组不会越界
+    if (g_recordedPointCount < MAX_TRAJECTORY_POINTS) {
+        // 为新轨迹点分配索引
+        int index = g_recordedPointCount;
+        
+        // 存储时间戳
+        g_recordedPoints[index].timestamp = millis();
+        
+        // 存储关节角度(转换为度)并检查限制
+        bool hasLimitedAngles = false;
+        for (int i = 0; i < ARM_DOF; i++) {
+            // 将弧度转换为度，得到轨迹规划角度
+            float traj_angle_deg = angles(i) * 180.0f / M_PI;
+            
+            // 检查轨迹规划角度范围（-120到+120度）
+            if (traj_angle_deg < -120.0f) {
+                Serial.printf("[警告] 记录时关节%d轨迹角度 %.2f° 小于最小值-120°，已限制\n", 
+                           i+1, traj_angle_deg);
+                traj_angle_deg = -120.0f;
+                hasLimitedAngles = true;
+            }
+            else if (traj_angle_deg > 120.0f) {
+                Serial.printf("[警告] 记录时关节%d轨迹角度 %.2f° 大于最大值+120°，已限制\n", 
+                           i+1, traj_angle_deg);
+                traj_angle_deg = 120.0f;
+                hasLimitedAngles = true;
+            }
+            
+            // 存储轨迹规划角度
+            g_recordedPoints[index].jointAngles[i] = traj_angle_deg;
+        }
+        
+        // 增加计数器
+        g_recordedPointCount++;
+        
+        // 输出确认信息
+        Serial.printf("[TRAJ_REC] 记录轨迹点 #%d (轨迹角度): [", g_recordedPointCount);
+        for (int i = 0; i < ARM_DOF; i++) {
+            Serial.printf("%.2f", g_recordedPoints[index].jointAngles[i]);
+            if (i < ARM_DOF-1) Serial.print(", ");
+        }
+        Serial.println("]");
+        
+        // 如果有角度被限制，输出警告
+        if (hasLimitedAngles) {
+            Serial.println("[警告] 部分关节轨迹角度超出范围(-120到+120度)，已自动限制");
+        }
+    } else {
+        Serial.println("[TRAJ_REC] 警告: 轨迹点数已达上限，无法继续记录!");
+    }
+    
+    // 释放互斥锁
+    xSemaphoreGive(g_pointsMutex);
+}
+
+// 重置记录的轨迹点 - 静态方法实现
+void TrajectoryExecutor::resetRecordedPoints() {
+    // 检查互斥锁
+    if (g_pointsMutex == NULL) {
+        Serial.println("错误: 轨迹点互斥锁未初始化!");
+        return;
+    }
+    
+    // 尝试获取互斥锁
+    if (xSemaphoreTake(g_pointsMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        Serial.println("错误: 无法获取轨迹点互斥锁!");
+        return;
+    }
+    
+    // 重置计数器
+    g_recordedPointCount = 0;
+    
+    // 清空数组(可选)
+    memset(g_recordedPoints, 0, sizeof(g_recordedPoints));
+    
+    Serial.println("[TRAJ_REC] 已重置所有记录的轨迹点");
+    
+    // 释放互斥锁
+    xSemaphoreGive(g_pointsMutex);
+}
+
+// 将记录的轨迹点以矩阵形式输出到串口 - 静态方法实现
+void TrajectoryExecutor::outputTrajectoryMatrix() {
+    // 检查互斥锁
+    if (g_pointsMutex == NULL) {
+        Serial.println("错误: 轨迹点互斥锁未初始化!");
+        return;
+    }
+    
+    // 尝试获取互斥锁
+    if (xSemaphoreTake(g_pointsMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        Serial.println("错误: 无法获取轨迹点互斥锁!");
+        return;
+    }
+    
+    // 检查是否有记录的点
+    if (g_recordedPointCount == 0) {
+        Serial.println("没有记录的轨迹点数据");
+        xSemaphoreGive(g_pointsMutex);
+        return;
+    }
+    
+    // 输出矩阵头
+    Serial.println("\n===== 关节角度矩阵 =====");
+    
+    // 按格式输出每个点
+    for (int i = 0; i < g_recordedPointCount; i++) {
+        // 使用"1. x.xx, y.yy, ..."格式输出
+        Serial.printf("%d. ", i+1);
+        for (int j = 0; j < ARM_DOF; j++) {
+            // 直接输出度数值，保留两位小数
+            Serial.printf("%.2f", g_recordedPoints[i].jointAngles[j]);
+            if (j < ARM_DOF-1) Serial.print(", ");
+        }
+        Serial.println();
+    }
+    
+    Serial.println("===== 矩阵结束 =====\n");
+    
+    // 释放互斥锁
+    xSemaphoreGive(g_pointsMutex);
 }

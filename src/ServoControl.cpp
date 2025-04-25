@@ -34,6 +34,50 @@ float pulseToAngle(int pulse) {
   return map(pulse * 10, 0, 1000 * 10, SERVO_MIN_ANGLE * 10, SERVO_MAX_ANGLE * 10) / 10.0;
 }
 
+// 将轨迹规划角度(-120到+120度，0为中位)转换为舵机物理角度(0-240度)
+float trajAngleToServoAngle(float trajAngle) {
+  // 轨迹规划角度范围：-120到+120度，0为中位
+  // 舵机物理角度范围：0-240度，120为中位
+  // 简单转换公式：舵机角度 = 轨迹角度 + 120
+  float servoAngle = trajAngle + 120.0f;
+  
+  // 约束到舵机的物理限制范围
+  servoAngle = constrain(servoAngle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+  
+  return servoAngle;
+}
+
+// 将舵机物理角度(0-240度)转换为轨迹规划角度(-120到+120度，0为中位)
+float servoAngleToTrajAngle(float servoAngle) {
+  // 舵机物理角度范围：0-240度，120为中位
+  // 轨迹规划角度范围：-120到+120度，0为中位
+  // 简单转换公式：轨迹角度 = 舵机角度 - 120
+  float trajAngle = servoAngle - 120.0f;
+  
+  // 约束到轨迹规划的角度范围
+  trajAngle = constrain(trajAngle, -120.0f, 120.0f);
+  
+  return trajAngle;
+}
+
+// 直接将轨迹规划角度转换为舵机控制值
+int trajAngleToPulse(float trajAngle) {
+  // 先转换为舵机物理角度
+  float servoAngle = trajAngleToServoAngle(trajAngle);
+  
+  // 再转换为舵机控制值
+  return angleToPulse(servoAngle);
+}
+
+// 直接将舵机控制值转换为轨迹规划角度
+float pulseToTrajAngle(int pulse) {
+  // 先转换为舵机物理角度
+  float servoAngle = pulseToAngle(pulse);
+  
+  // 再转换为轨迹规划角度
+  return servoAngleToTrajAngle(servoAngle);
+}
+
 // 初始化舵机
 void initServo() {
   Serial.println("初始化舵机控制...");
@@ -320,5 +364,31 @@ void setJointAngles(const float angles[7], int moveTime) {
     
     // 批量控制所有舵机
     moveMultipleServos(servoArray, 7, moveTime);
+}
+
+// 获取当前关节的轨迹规划角度
+void getCurrentTrajAngles(float angles[7]) {
+  float servoAngles[7];
+  
+  // 先获取当前舵机物理角度
+  getCurrentJointAngles(servoAngles);
+  
+  // 转换为轨迹规划角度
+  for(int i = 0; i < 7; i++) {
+    angles[i] = servoAngleToTrajAngle(servoAngles[i]);
+  }
+}
+
+// 设置关节的轨迹规划角度
+void setTrajAngles(const float trajAngles[7], int moveTime) {
+  float servoAngles[7];
+  
+  // 转换为舵机物理角度
+  for(int i = 0; i < 7; i++) {
+    servoAngles[i] = trajAngleToServoAngle(trajAngles[i]);
+  }
+  
+  // 设置舵机物理角度
+  setJointAngles(servoAngles, moveTime);
 }
 

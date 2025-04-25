@@ -15,7 +15,6 @@
 #define BRAKE_DELAY 200       // 停止延迟(ms)
 #define GRIPPER_MIN 0         // 夹爪最小值
 #define GRIPPER_MAX 1000      // 夹爪最大值
-#define MAX_TRAJECTORY_POINTS 1000  // 轨迹记录最大点数
 
 // 必要的外部声明
 extern QueueHandle_t servoCommandQueue;
@@ -45,10 +44,6 @@ private:
     bool isTrajectoryRunning;     // 是否正在执行轨迹
     TrajectoryExecutor* trajectoryExecutor;  // 轨迹执行器指针
     
-    // 关节角度记录数组
-    int trajectoryJointAngles[MAX_TRAJECTORY_POINTS][7];  // 存储轨迹中每个点的7个关节角度
-    int trajectoryPointCount;                             // 已记录的轨迹点数
-    
     // 内部方法
     // 处理关节控制，支持动作组记录
     void handleJointControl();
@@ -58,14 +53,6 @@ private:
     void resetAll();
     // 处理三角键的演示功能 - 执行搬运任务
     void handleDemoPickPlace();
-    // 记录当前关节角度
-    void recordJointAngles();
-    // 记录当前的关节角度（即使不在轨迹执行中）
-    void recordCurrentJointAngles();
-    // 输出记录的关节角度矩阵到串口
-    void outputJointAnglesMatrix();
-    // 重置关节角度记录
-    void resetJointAngleRecords();
 
 public:
     PS2Controller();
