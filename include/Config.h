@@ -40,6 +40,15 @@ extern const int gripperServo;
 #define MIN_COMMAND_INTERVAL 20 // 命令最小间隔(毫秒)
 #define CENTER_POSITION 500     // 中心位置值
 
+// 定义舵机方向系数（1表示正方向，-1表示反方向）
+#define JOINT_DIRECTION_1  1
+#define JOINT_DIRECTION_2  1
+#define JOINT_DIRECTION_3  1  
+#define JOINT_DIRECTION_4  -1
+#define JOINT_DIRECTION_5  1  
+#define JOINT_DIRECTION_6  1
+#define JOINT_DIRECTION_7  1
+
 // 定义串口引脚
 #define SERVO_SERIAL_RX_PIN 16
 #define SERVO_SERIAL_TX_PIN 17

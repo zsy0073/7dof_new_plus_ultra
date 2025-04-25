@@ -318,9 +318,11 @@ void PS2Controller::handleDemoPickPlace() {
         // 在执行新轨迹前重置全局轨迹点记录
         TrajectoryExecutor::resetRecordedPoints();
         
-        if (trajectoryExecutor->executeCommand(cmd)) {
-            isTrajectoryRunning = true;
-            Serial.println("搬运演示轨迹开始执行");
+        // 修改为直接调用processTrajectoryCommand，而不是executeCommand
+        // 这样可以确保显示进度信息
+        extern bool processTrajectoryCommand(const TrajectoryCommand& cmd);
+        if (processTrajectoryCommand(cmd)) {
+            Serial.println("搬运演示轨迹执行完毕");
         } else {
             Serial.println("搬运演示轨迹执行失败");
         }

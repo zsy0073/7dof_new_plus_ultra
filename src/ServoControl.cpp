@@ -61,7 +61,39 @@ float servoAngleToTrajAngle(float servoAngle) {
 }
 
 // 直接将轨迹规划角度转换为舵机控制值
+int trajAngleToPulse(float trajAngle, int servo_id) {
+  // 准备一个数组存储所有关节的方向系数
+  static const int jointDirections[7] = {
+    JOINT_DIRECTION_1, JOINT_DIRECTION_2, JOINT_DIRECTION_3, 
+    JOINT_DIRECTION_4, JOINT_DIRECTION_5, JOINT_DIRECTION_6, 
+    JOINT_DIRECTION_7
+  };
+  
+  // 查找舵机ID对应的关节索引
+  int jointIndex = -1;
+  for (int i = 0; i < 7; i++) {
+    if (servo_id == jointServos[i]) {
+      jointIndex = i;
+      break;
+    }
+  }
+  
+  // 如果找到匹配的关节索引，应用方向系数
+  if (jointIndex >= 0) {
+    trajAngle = trajAngle * jointDirections[jointIndex];
+  }
+  
+  // 先转换为舵机物理角度
+  float servoAngle = trajAngleToServoAngle(trajAngle);
+  
+  // 再转换为舵机控制值
+  return angleToPulse(servoAngle);
+}
+
+// 重载原始函数，无参数版本，用于兼容现有代码
 int trajAngleToPulse(float trajAngle) {
+  // 由于不知道是哪个关节，我们无法应用方向系数
+  // 但为了兼容性保留此函数
   // 先转换为舵机物理角度
   float servoAngle = trajAngleToServoAngle(trajAngle);
   
@@ -91,15 +123,27 @@ void initServo() {
     servoArray[i].ID = jointServos[i];
     servoArray[i].Position = CENTER_POSITION;
     servoStates[i].currentPos = CENTER_POSITION;
+    armStatus.joints[i] = CENTER_POSITION;
   }
   
   // 设置夹持器到中心位置
   servoArray[7].ID = gripperServo;
   servoArray[7].Position = CENTER_POSITION;
   servoStates[7].currentPos = CENTER_POSITION;
+  armStatus.gripper = CENTER_POSITION;
   
-  // 批量发送命令 - 同时控制所有舵机
-  servos.moveServos(servoArray, 8, SERVO_MOVE_TIME);
+  // 使用自动计算的复位时间（与X键模式相同）
+  int moveTime = calculateAutoResetTime();
+  
+  Serial.print("初始化舵机使用自动复位时间: ");
+  Serial.print(moveTime);
+  Serial.println("ms");
+  
+  // 使用移动多个舵机的函数 - 它会自动应用方向系数
+  moveMultipleServos(servoArray, 8, moveTime);
+  
+  // 标记为已更新
+  armStatus.updated = true;
   
   Serial.println("所有舵机已同时初始化到中心位置");
 }
@@ -131,6 +175,23 @@ void moveServo(int servoId, int position) {
   // 获取舵机索引
   int index = getServoIndex(servoId);
   if (index < 0) return;
+  
+  // 应用方向系数(仅对关节舵机)
+  static const int jointDirections[7] = {
+    JOINT_DIRECTION_1, JOINT_DIRECTION_2, JOINT_DIRECTION_3, 
+    JOINT_DIRECTION_4, JOINT_DIRECTION_5, JOINT_DIRECTION_6, 
+    JOINT_DIRECTION_7
+  };
+  
+  // 仅对关节舵机处理方向系数
+  if (servoId >= 1 && servoId <= 7) {
+    int jointIndex = servoId - 1;
+    if (jointDirections[jointIndex] == -1) {
+      // 如果方向系数为-1，对位置值取反
+      // 舵机控制值范围是0-1000，中心点是500
+      position = 1000 - position;
+    }
+  }
   
   // 打印舵机移动信息
   Serial.print("舵机移动: ID=");
@@ -194,12 +255,8 @@ void resetServos() {
   servoStates[7].currentPos = CENTER_POSITION;
   armStatus.gripper = CENTER_POSITION;
   
-  // 批量发送命令 - 同时控制所有舵机
-  servos.moveServos(servoArray, 8, moveTime);
-  
-  // 更新最后一次舵机移动预计完成的时间
-  // 添加额外的100ms缓冲，确保复位完全执行
-  servoLastMoveEndTime = millis() + moveTime + 100;
+  // 使用移动多个舵机的函数 - 它会自动应用方向系数
+  moveMultipleServos(servoArray, 8, moveTime);
   
   // 标记为已更新
   armStatus.updated = true;
@@ -301,10 +358,38 @@ void handleServoControl(int servoId, int position) {
 
 // 添加批量控制多个舵机的功能
 void moveMultipleServos(LobotServo servoArray[], int servoCount, int moveTime) {
-  // 批量发送命令 - 同时控制多个舵机
-  servos.moveServos(servoArray, servoCount, moveTime);
+  // 获取方向系数数组
+  static const int jointDirections[7] = {
+    JOINT_DIRECTION_1, JOINT_DIRECTION_2, JOINT_DIRECTION_3, 
+    JOINT_DIRECTION_4, JOINT_DIRECTION_5, JOINT_DIRECTION_6, 
+    JOINT_DIRECTION_7
+  };
   
-  // 更新舵机状态
+  // 创建临时数组用于发送命令
+  LobotServo tempServoArray[servoCount];
+  
+  // 复制并应用方向系数
+  for (int i = 0; i < servoCount; i++) {
+    tempServoArray[i].ID = servoArray[i].ID;
+    int position = servoArray[i].Position;
+    
+    // 仅对关节舵机处理方向系数
+    if (servoArray[i].ID >= 1 && servoArray[i].ID <= 7) {
+      int jointIndex = servoArray[i].ID - 1;
+      if (jointDirections[jointIndex] == -1) {
+        // 如果方向系数为-1，对位置值取反
+        // 舵机控制值范围是0-1000，中心点是500
+        position = 1000 - position;
+      }
+    }
+    
+    tempServoArray[i].Position = position;
+  }
+  
+  // 批量发送命令 - 同时控制多个舵机
+  servos.moveServos(tempServoArray, servoCount, moveTime);
+  
+  // 更新舵机状态 - 使用原始值（未经方向调整的）存储
   for (int i = 0; i < servoCount; i++) {
     int index = getServoIndex(servoArray[i].ID);
     if (index >= 0) {
@@ -356,10 +441,24 @@ void getCurrentJointAngles(float angles[7]) {
 void setJointAngles(const float angles[7], int moveTime) {
     LobotServo servoArray[7];
     
-    // 将角度转换为控制值
+    // 准备一个数组存储所有关节的方向系数
+    static const int jointDirections[7] = {
+        JOINT_DIRECTION_1, JOINT_DIRECTION_2, JOINT_DIRECTION_3, 
+        JOINT_DIRECTION_4, JOINT_DIRECTION_5, JOINT_DIRECTION_6, 
+        JOINT_DIRECTION_7
+    };
+    
+    // 将角度转换为控制值，应用方向系数
     for(int i = 0; i < 7; i++) {
         servoArray[i].ID = jointServos[i];
-        servoArray[i].Position = angleToPulse(angles[i]);
+        // 应用方向系数
+        float adjustedAngle = angles[i];
+        if (jointDirections[i] == -1) {
+            // 如果方向系数为-1，对角度取反
+            // 由于舵机角度是0-240度范围，我们需要围绕中心点120度进行反转
+            adjustedAngle = 240 - adjustedAngle;
+        }
+        servoArray[i].Position = angleToPulse(adjustedAngle);
     }
     
     // 批量控制所有舵机
@@ -381,14 +480,16 @@ void getCurrentTrajAngles(float angles[7]) {
 
 // 设置关节的轨迹规划角度
 void setTrajAngles(const float trajAngles[7], int moveTime) {
-  float servoAngles[7];
+  LobotServo servoArray[7];
   
-  // 转换为舵机物理角度
+  // 应用方向系数并转换为舵机控制值
   for(int i = 0; i < 7; i++) {
-    servoAngles[i] = trajAngleToServoAngle(trajAngles[i]);
+    // 直接使用带有servo_id参数的trajAngleToPulse函数，应用关节方向系数
+    servoArray[i].ID = jointServos[i];
+    servoArray[i].Position = trajAngleToPulse(trajAngles[i], jointServos[i]);
   }
   
-  // 设置舵机物理角度
-  setJointAngles(servoAngles, moveTime);
+  // 批量控制所有舵机
+  moveMultipleServos(servoArray, 7, moveTime);
 }
 

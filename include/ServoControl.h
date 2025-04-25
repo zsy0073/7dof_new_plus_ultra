@@ -35,6 +35,8 @@ float trajAngleToServoAngle(float trajAngle);
 float servoAngleToTrajAngle(float servoAngle);
 // 直接将轨迹规划角度转换为舵机控制值
 int trajAngleToPulse(float trajAngle);
+// 新增：带舵机ID参数的轨迹规划角度转换函数，用于应用方向系数
+int trajAngleToPulse(float trajAngle, int servo_id);
 // 直接将舵机控制值转换为轨迹规划角度
 float pulseToTrajAngle(int pulse);
 

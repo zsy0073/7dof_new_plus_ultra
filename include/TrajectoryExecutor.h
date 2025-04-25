@@ -51,6 +51,7 @@ public:
     bool isTrajectoryFinished() const;
     float getProgress() const;
     
+    // 恢复声明，但使用空实现保持兼容性
     void setCalculationQueues(QueueHandle_t commandQueue, QueueHandle_t resultQueue);
     bool setTrajectory(const MatrixXd& trajectory, const VectorXd& timePoints);
     
@@ -84,6 +85,9 @@ public:
     // 将记录的轨迹点以矩阵形式输出到串口
     static void outputTrajectoryMatrix();
     
+    // 直接执行所有轨迹点，不依赖update方法
+    bool executeAllTrajectoryPoints();
+    
 private:
     TrajectoryPlanner& planner_;
     RobotKinematics& kinematics_;
@@ -94,8 +98,9 @@ private:
     unsigned long startTime_ = 0;
     bool isExecuting_ = false;
     
-    QueueHandle_t calcCommandQueue_ = nullptr;
-    QueueHandle_t calcResultQueue_ = nullptr;
+    // 移除不再需要的队列引用
+    // QueueHandle_t calcCommandQueue_ = nullptr;
+    // QueueHandle_t calcResultQueue_ = nullptr;
     SemaphoreHandle_t trajectoryMutex_ = nullptr;
     
     // 添加当前关节角度存储

@@ -15,14 +15,20 @@
 // 全局轨迹执行器
 extern TrajectoryExecutor* trajectoryExecutor;
 
-// 任务函数声明 - 保留所有任务函数，它们都在使用中
+// 任务函数声明
 void networkTask(void *parameter);
 void servoControlTask(void *parameter);
 void displayAndTemperatureTask(void *parameter);
 void ps2ControllerTask(void *parameter);
-void trajectoryTask(void *parameter);
-void trajectoryCalculationTask(void *parameter);
+// 移除旧的独立任务声明
+// void trajectoryTask(void *parameter);
+// void trajectoryCalculationTask(void *parameter);
+// 添加统一任务声明
+void unifiedTrajectoryTask(void *parameter);
 void setupTasks();
+
+// 轨迹命令处理函数声明
+bool processTrajectoryCommand(const TrajectoryCommand& cmd);
 
 // 外部变量声明
 extern QueueHandle_t servoCommandQueue;

@@ -186,40 +186,26 @@ bool TrajectoryExecutor::parseCommand(const String& cmdStr, TrajectoryCommand& c
 }
 
 bool TrajectoryExecutor::executeCommand(const TrajectoryCommand& cmd) {
-    if(isExecuting_) return false;
+    // 该方法在合并任务后，不再需要使用队列通信
+    // 仅保留基本功能和状态检查，实际计算和执行由processTrajectoryCommand完成
     
-    // 确保计算队列已设置
-    if(calcCommandQueue_ == nullptr || calcResultQueue_ == nullptr) {
-        Serial.println("错误: 轨迹计算队列未设置");
+    if(isExecuting_) {
+        Serial.println("错误: 轨迹正在执行中，无法启动新命令");
         return false;
     }
     
-    // 发送命令到计算任务
-    if(xQueueSend(calcCommandQueue_, &cmd, pdMS_TO_TICKS(500)) != pdTRUE) {
-        Serial.println("错误: 发送轨迹计算命令失败");
-        return false;
+    // 检查轨迹互斥锁是否已创建
+    if(trajectoryMutex_ == nullptr) {
+        trajectoryMutex_ = xSemaphoreCreateMutex();
+        if(trajectoryMutex_ == nullptr) {
+            Serial.println("错误: 无法创建轨迹互斥锁");
+            return false;
+        }
     }
     
-    Serial.println("已发送轨迹计算命令，等待计算完成...");
-    
-    // 等待结果 - 增加超时时间到60秒，因为轨迹计算很耗时
-    bool success = false;
-    if(xQueueReceive(calcResultQueue_, &success, pdMS_TO_TICKS(60000)) != pdTRUE) {
-        Serial.println("错误: 等待轨迹计算结果超时");
-        return false;
-    }
-    
-    if(success) {
-        // 开始执行轨迹
-        currentPoint_ = 0;
-        startTime_ = millis();
-        isExecuting_ = true;
-        Serial.println("轨迹计算成功，开始执行");
-        return true;
-    } else {
-        Serial.println("轨迹计算失败");
-        return false;
-    }
+    // 简单返回成功，实际计算和执行由统一任务完成
+    Serial.println("轨迹命令已接收，准备执行");
+    return true;
 }
 
 void TrajectoryExecutor::sendToServos(const VectorXd& angles) {
@@ -272,30 +258,52 @@ void TrajectoryExecutor::update() {
     unsigned long currentTime = millis();
     float elapsedTime = (currentTime - startTime_) / 1000.0f;  // 转换为秒
     
-    // 找到当前时间对应的轨迹点
-    while(currentPoint_ < trajectory_.rows() && 
-          timePoints_(currentPoint_) <= elapsedTime) {
-        
-        // 发送关节角度给舵机
-        VectorXd angles = trajectory_.row(currentPoint_);
-        sendToServos(angles);
-        
-        // 更新当前关节角度
-        current_angles_ = angles;
-        
-        // 不再记录轨迹点，因为已经在计算阶段记录完毕
-        
-        Serial.printf("执行轨迹点 %d/%d, 时间=%.2f秒\n", 
-                     currentPoint_+1, trajectory_.rows(), timePoints_(currentPoint_));
-        
-        currentPoint_++;
+    // 静态变量，用于追踪轨迹点执行
+    static unsigned long lastSendTime = 0;
+    static int lastExecutedPoint = 0;
+    
+    // 检查是否有轨迹点需要执行
+    if(currentPoint_ < trajectory_.rows()) {
+        // 如果当前点和上次执行的点不同，并且距离上次发送时间已经过去了至少100ms
+        if(currentPoint_ != lastExecutedPoint && (currentTime - lastSendTime >= 100)) {
+            // 发送关节角度给舵机
+            VectorXd angles = trajectory_.row(currentPoint_);
+            
+            // 输出详细调试信息
+            Serial.printf("[TRAJ_EXEC] 执行轨迹点 %d/%d, 时间=%.2f秒, 实际时间=%.2f秒\n", 
+                         currentPoint_+1, trajectory_.rows(), 
+                         timePoints_(currentPoint_), elapsedTime);
+            
+            // 发送命令到舵机
+            sendToServos(angles);
+            
+            // 更新当前关节角度
+            current_angles_ = angles;
+            
+            // 更新执行状态
+            lastSendTime = currentTime;
+            lastExecutedPoint = currentPoint_;
+            
+            // 移至下一点
+            currentPoint_++;
+        }
+        // 如果需要执行下一个点并已经达到该点的执行时间
+        else if(timePoints_(currentPoint_) <= elapsedTime) {
+            // 递增当前点索引以便下次执行
+            currentPoint_++;
+        }
     }
     
     // 检查轨迹是否完成
-    if(currentPoint_ >= trajectory_.rows()) {
+    if(currentPoint_ >= trajectory_.rows() && (currentTime - lastSendTime) >= 500) {
+        // 确保最后一个点已经有足够时间执行
         isExecuting_ = false;
-        Serial.println("轨迹已全部执行完成");
-        Serial.printf("已记录了 %d 个轨迹点，按方框键查看详细数据\n", g_recordedPointCount);
+        Serial.println("[TRAJ_EXEC] 轨迹已全部执行完成!");
+        Serial.printf("[TRAJ_EXEC] 共执行了 %d 个轨迹点，可按方框键查看详细数据\n", g_recordedPointCount);
+        
+        // 重置静态变量
+        lastSendTime = 0;
+        lastExecutedPoint = 0;
     }
 }
 
@@ -312,39 +320,86 @@ float TrajectoryExecutor::getProgress() const {
 
 
 
+// 该方法在合并任务后不再需要，保留空实现以兼容现有代码
 void TrajectoryExecutor::setCalculationQueues(QueueHandle_t commandQueue, QueueHandle_t resultQueue) {
-    calcCommandQueue_ = commandQueue;
-    calcResultQueue_ = resultQueue;
+    // 此方法在新架构中不再需要，但保留以兼容现有代码
+    Serial.println("注意: 任务已合并，不再需要设置计算队列");
     
-    // 创建互斥锁保护轨迹数据
+    // 仍然创建互斥锁以保护轨迹数据
     if(trajectoryMutex_ == nullptr) {
         trajectoryMutex_ = xSemaphoreCreateMutex();
+        if(trajectoryMutex_ == nullptr) {
+            Serial.println("错误: 无法创建轨迹互斥锁");
+        } else {
+            Serial.println("轨迹互斥锁已创建");
+        }
     }
-    
-    Serial.println("轨迹计算队列已设置");
 }
 
 bool TrajectoryExecutor::setTrajectory(const MatrixXd& trajectory, const VectorXd& timePoints) {
-    if(trajectoryMutex_ == nullptr) {
+    // 首先检查轨迹数据的有效性
+    if (trajectory.rows() <= 0 || timePoints.size() <= 0) {
+        Serial.println("错误: 轨迹数据为空");
         return false;
     }
     
-    if(xSemaphoreTake(trajectoryMutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        Serial.println("无法获取轨迹互斥锁");
+    if (trajectory.rows() != timePoints.size()) {
+        Serial.printf("错误: 轨迹点数 (%d) 与时间点数 (%d) 不匹配\n", 
+                     trajectory.rows(), timePoints.size());
         return false;
     }
+    
+    // 检查互斥锁初始化
+    if (trajectoryMutex_ == nullptr) {
+        Serial.println("警告: 轨迹互斥锁未初始化，正在创建");
+        trajectoryMutex_ = xSemaphoreCreateMutex();
+        if (trajectoryMutex_ == nullptr) {
+            Serial.println("错误: 无法创建轨迹互斥锁");
+            return false;
+        }
+    }
+    
+    // 尝试获取互斥锁
+    if (xSemaphoreTake(trajectoryMutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println("错误: 无法获取轨迹互斥锁");
+        return false;
+    }
+    
+    // 输出轨迹信息
+    Serial.printf("轨迹信息: 共 %d 个点, 总时长 %.2f 秒\n", 
+                 trajectory.rows(), timePoints(timePoints.size()-1));
     
     try {
-        // 安全地复制轨迹数据
-        trajectory_ = trajectory;
-        timePoints_ = timePoints;
+        // 为轨迹数据分配足够的空间
+        trajectory_.resize(trajectory.rows(), trajectory.cols());
+        timePoints_.resize(timePoints.size());
         
+        // 复制轨迹数据
+        for (int i = 0; i < trajectory.rows(); i++) {
+            for (int j = 0; j < trajectory.cols(); j++) {
+                trajectory_(i, j) = trajectory(i, j);
+            }
+            timePoints_(i) = timePoints(i);
+        }
+        
+        // 重置执行状态
+        currentPoint_ = 0;
+        startTime_ = 0;
+        isExecuting_ = false;
+        
+        // 输出成功信息
+        Serial.printf("成功设置轨迹: %d 个点已准备就绪\n", trajectory_.rows());
         xSemaphoreGive(trajectoryMutex_);
         return true;
     }
-    catch(...) {
+    catch (const std::exception& e) {
+        Serial.printf("设置轨迹数据时异常: %s\n", e.what());
         xSemaphoreGive(trajectoryMutex_);
-        Serial.println("设置轨迹数据时发生异常");
+        return false;
+    }
+    catch (...) {
+        Serial.println("设置轨迹数据时发生未知异常");
+        xSemaphoreGive(trajectoryMutex_);
         return false;
     }
 }
@@ -388,16 +443,37 @@ bool TrajectoryExecutor::moveToSafePose() {
     // 使用现有方法移动到安全位置
     Serial.println("正在移动到安全的无奇异初始位置...");
     
-    // 直接使用现有的sendToServos方法发送舵机命令
-    sendToServos(safe_q);
+    // 创建舵机批量控制数组，设置2秒移动时间
+    LobotServo servoArray[7];
+    for(int i = 0; i < 7; i++) {
+        // 将弧度转换为度
+        float traj_angle_deg = safe_q(i) * 180.0f / M_PI;
+        
+        // 直接从轨迹规划角度转换为舵机控制值
+        int pulse = trajAngleToPulse(traj_angle_deg);
+        servoArray[i].ID = jointServos[i];
+        servoArray[i].Position = pulse;
+    }
+    
+    // 设置移动时间为2000毫秒（2秒）
+    const int moveTime = 2000;
+    
+    // 记录开始时间
+    unsigned long startTime = millis();
+    
+    // 批量控制所有舵机，移动时间设为2秒
+    moveMultipleServos(servoArray, 7, moveTime);
     
     // 等待移动完成
-    delay(2000); // 给予充足时间完成移动
+    delay(moveTime);
+    
+    // 记录结束时间并计算实际经过的时间
+    unsigned long elapsedTime = millis() - startTime;
+    Serial.printf("已移动到安全的无奇异初始位置，耗时: %lu 毫秒\n", elapsedTime);
     
     // 更新当前关节角度
     current_angles_ = safe_q;
     
-    Serial.println("已移动到安全的无奇异初始位置");
     return true;
 }
 
@@ -572,4 +648,124 @@ void TrajectoryExecutor::outputTrajectoryMatrix() {
     
     // 释放互斥锁
     xSemaphoreGive(g_pointsMutex);
+}
+
+// 直接按顺序执行所有轨迹点的方法实现
+bool TrajectoryExecutor::executeAllTrajectoryPoints() {
+    if(trajectoryMutex_ == nullptr) {
+        Serial.println("错误: 轨迹互斥锁未初始化");
+        return false;
+    }
+    
+    if(xSemaphoreTake(trajectoryMutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println("错误: 无法获取轨迹互斥锁");
+        return false;
+    }
+    
+    // 检查轨迹是否已加载
+    if(trajectory_.rows() <= 0) {
+        Serial.println("错误: 没有轨迹点可执行");
+        xSemaphoreGive(trajectoryMutex_);
+        return false;
+    }
+    
+    Serial.printf("\n[TRAJ_EXEC] ====== 开始执行所有轨迹点 (共%d点) ======\n", trajectory_.rows());
+    
+    // 标记为正在执行状态
+    isExecuting_ = true;
+    
+    // 清空串口缓冲区
+    while(Serial2.available()) {
+        Serial2.read();
+    }
+    
+    // 初始准备延时
+    delay(300);
+    
+    // 统计执行的轨迹点数
+    int executedPoints = 0;
+    
+    // 逐点执行轨迹点 - 使用舵机组命令同时控制所有舵机
+    for(int i = 0; i < trajectory_.rows(); i++) {
+        // 输出当前点执行进度
+        Serial.printf("\n[TRAJ_EXEC] 执行轨迹点 %d/%d (进度 %d%%)...\n", 
+                     i+1, trajectory_.rows(), 
+                     (i+1)*100/trajectory_.rows());
+        
+        // 获取当前轨迹点关节角度（弧度）
+        VectorXd angles = trajectory_.row(i);
+        
+        // 创建舵机批量控制数组
+        LobotServo servoArray[7];
+        
+        // 打印角度信息
+        Serial.print("[TRAJ_EXEC] 角度(度): [");
+        
+        // 将弧度转换为度，然后将轨迹规划角度转换为舵机控制值
+        for(int j = 0; j < 7; j++) {
+            // 将弧度转换为度
+            float traj_angle_deg = angles(j) * 180.0f / M_PI;
+            
+            // 检查轨迹规划角度范围（-120到+120度）
+            if (traj_angle_deg < -120.0f) {
+                traj_angle_deg = -120.0f;
+            }
+            else if (traj_angle_deg > 120.0f) {
+                traj_angle_deg = 120.0f;
+            }
+            
+            // 打印角度值
+            Serial.printf("%.2f", traj_angle_deg);
+            if(j < 6) Serial.print(", ");
+            
+            // 直接从轨迹规划角度转换为舵机控制值
+            int pulse = trajAngleToPulse(traj_angle_deg);
+            servoArray[j].ID = jointServos[j];
+            servoArray[j].Position = pulse;
+        }
+        Serial.println("]");
+        
+        // 使用较长的移动时间确保舵机能够准确到达目标位置
+        int moveTime = 300;
+        if(i < trajectory_.rows() - 1) {
+            // 根据轨迹点间的实际时间计算移动时间（毫秒）
+            float timeDiff = (timePoints_(i+1) - timePoints_(i)) * 1000;
+            moveTime = max(300, min(800, (int)timeDiff));
+        }
+        
+        // 输出命令信息
+        Serial.printf("[TRAJ_EXEC] 发送舵机组命令，移动时间 = %d ms\n", moveTime);
+        
+        // 一次性控制所有舵机 - 关键改动，使用舵机组命令
+        moveMultipleServos(servoArray, 7, moveTime);
+        
+        // 更新当前关节角度
+        current_angles_ = angles;
+        
+        // 等待舵机移动完成 - 使用较大的延时以确保舵机到位
+        Serial.println("[TRAJ_EXEC] 等待舵机移动完成...");
+        delay(moveTime + 200); // 额外200ms确保命令完成执行
+        
+        // 每5个点添加额外稳定延时
+        if(i % 5 == 4) {
+            Serial.println("[TRAJ_EXEC] 添加额外稳定延时...");
+            delay(300);
+        }
+        
+        // 记录已执行的点数
+        executedPoints++;
+    }
+    
+    // 最后的延时确保所有命令执行完成
+    delay(500);
+    
+    // 重置执行状态
+    isExecuting_ = false;
+    
+    // 输出执行摘要
+    Serial.printf("\n[TRAJ_EXEC] ===== 轨迹执行完成! 共执行 %d/%d 个点 =====\n", 
+                 executedPoints, trajectory_.rows());
+                 
+    xSemaphoreGive(trajectoryMutex_);
+    return true;
 }

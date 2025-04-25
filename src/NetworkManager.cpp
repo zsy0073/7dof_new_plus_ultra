@@ -3,6 +3,7 @@
 #include "DisplayUtils.h"
 #include "Tasks.h"
 #include "ActionGroup.h"  // 添加动作组头文件
+#include <stdint.h>      // 添加对标准整数类型的支持
 
 // 创建Web服务器和WebSocket对象
 AsyncWebServer server(80);

@@ -7,6 +7,7 @@
  *****************************************************/
 
 #include "LobotServoController.h"
+#include <stdint.h>  // 添加对标准整数类型的支持
 
 #define GET_LOW_BYTE(A) (uint8_t)((A))
 //宏函数 获得A的低八位
