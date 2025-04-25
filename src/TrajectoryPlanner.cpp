@@ -2,6 +2,22 @@
 #include <math.h>
 #include <Eigen/Geometry>  // 用于四元数计算
 #include <Arduino.h>       // 添加Arduino头文件以支持Serial对象
+#include "RotationUtils.h" // 添加RotationUtils头文件
+
+// 定义日志级别
+#define LOG_ERROR   0
+#define LOG_WARNING 1
+#define LOG_INFO    2
+#define LOG_DEBUG   3
+
+// 设置当前日志级别（可以在config.h中定义）
+#define CURRENT_LOG_LEVEL LOG_WARNING
+
+// 日志宏，根据日志级别控制输出
+#define LOG_E(fmt, ...) if(CURRENT_LOG_LEVEL >= LOG_ERROR)   { Serial.printf("[ERROR] " fmt "\n", ##__VA_ARGS__); }
+#define LOG_W(fmt, ...) if(CURRENT_LOG_LEVEL >= LOG_WARNING) { Serial.printf("[WARN]  " fmt "\n", ##__VA_ARGS__); }
+#define LOG_I(fmt, ...) if(CURRENT_LOG_LEVEL >= LOG_INFO)    { Serial.printf("[INFO]  " fmt "\n", ##__VA_ARGS__); }
+#define LOG_D(fmt, ...) if(CURRENT_LOG_LEVEL >= LOG_DEBUG)   { Serial.printf("[DEBUG] " fmt "\n", ##__VA_ARGS__); }
 
 TrajectoryPlanner::TrajectoryPlanner() {
     sample_time_ = 0.01;      // 默认采样时间10ms
@@ -30,7 +46,6 @@ int TrajectoryPlanner::getMaxPoints() const {
 
 // 计算适应点数限制的采样时间
 double TrajectoryPlanner::calculateSampleTime(double duration, int desired_points) {
-    // 基于持续时间和期望点数计算采样时间
     // 确保至少有2个点（起点和终点）
     desired_points = std::max(2, desired_points);
     
@@ -57,9 +72,7 @@ void TrajectoryPlanner::planJointTrajectory(const VectorXd& q_start, const Vecto
         effective_sample_time = duration / (n_points - 1);
     }
     
-    // 只输出关键参数信息
-    Serial.printf("[轨迹] 关节轨迹: 时间=%.2f秒, 采样=%.4f秒, 点数=%d\n", 
-                  duration, effective_sample_time, n_points);
+    LOG_I("关节轨迹规划: 时长=%.2fs, 采样=%.4fs, 点数=%d", duration, effective_sample_time, n_points);
     
     trajectory.resize(n_points, ARM_DOF);
     time_points.resize(n_points);
@@ -83,20 +96,18 @@ void TrajectoryPlanner::planJointTrajectory(const VectorXd& q_start, const Vecto
             trajectory(j, i) = quinticPosition(t, coeffs.row(i));
         }
         
-        // 输出当前计算出的轨迹点关节角度
-        Serial.printf("关节轨迹点 #%d (时间=%.2f秒) 角度: [", j+1, t);
-        for(int i = 0; i < ARM_DOF; i++) {
-            float angle_deg = trajectory(j, i) * 180.0f / M_PI;
-            Serial.printf("%.2f", angle_deg);
-            if(i < ARM_DOF - 1) Serial.print(", ");
-        }
-        Serial.println("]°");
+        LOG_D("轨迹点 #%d (t=%.2fs): [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f]°", 
+            j+1, t, 
+            trajectory(j, 0)*180/M_PI, trajectory(j, 1)*180/M_PI, 
+            trajectory(j, 2)*180/M_PI, trajectory(j, 3)*180/M_PI, 
+            trajectory(j, 4)*180/M_PI, trajectory(j, 5)*180/M_PI, 
+            trajectory(j, 6)*180/M_PI);
     }
     
     // 平滑轨迹中的角度突变
     smoothJointTrajectory(trajectory, 60.0); // 60度作为默认阈值
     
-    Serial.println("[轨迹] 关节轨迹规划完成");
+    LOG_I("关节轨迹规划完成");
 }
 
 void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4d& T_end,
@@ -115,9 +126,7 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
         effective_sample_time = duration / (n_points - 1);
     }
     
-    // 输出调试信息
-    Serial.printf("笛卡尔直线轨迹规划: 持续时间=%.2f秒, 采样时间=%.4f秒, 点数=%d\n", 
-                  duration, effective_sample_time, n_points);
+    LOG_I("笛卡尔直线轨迹: 时长=%.2fs, 采样=%.4fs, 点数=%d", duration, effective_sample_time, n_points);
     
     trajectory.resize(n_points, ARM_DOF);
     time_points.resize(n_points);
@@ -138,27 +147,22 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
     }
     
     if(!valid_start) {
-        Serial.println("错误: 起点位置无效 (全为零)! 使用安全位置替代");
+        LOG_W("起点位置无效 (全为零)! 使用安全位置替代");
         // 使用一个安全的默认位置作为备选
-        p_start << 0.341, 0.000, 0.231;  // 使用终端输出中看到的当前位置
+        p_start << 0.341, 0.000, 0.231;
     }
     
-    // 输出起点和终点信息以便调试
-    Serial.printf("起点位置: [%.3f, %.3f, %.3f]\n", p_start(0), p_start(1), p_start(2));
-    Serial.printf("终点位置: [%.3f, %.3f, %.3f]\n", p_end(0), p_end(1), p_end(2));
+    LOG_D("起点: [%.3f, %.3f, %.3f], 终点: [%.3f, %.3f, %.3f]", 
+          p_start(0), p_start(1), p_start(2), p_end(0), p_end(1), p_end(2));
     
     // 检查路径长度，确保不超过工作空间
     double path_length = (p_end - p_start).norm();
-    Serial.printf("路径长度: %.3f 米\n", path_length);
+    LOG_D("路径长度: %.3f 米", path_length);
     
     if(path_length > 1.0) {  // 假设最大工作空间半径为1米
-        Serial.println("错误: 路径长度超出工作空间限制!");
+        LOG_E("路径长度超出工作空间限制!");
         throw std::runtime_error("Path length exceeds workspace limits");
     }
-    
-    // 计算每个时间点的位姿
-    bool solution_found = false;
-    int max_attempts = 1;  // 最大重试次数
     
     // 定义一个非奇异的参考配置作为初始位置
     VectorXd reference_config(ARM_DOF);
@@ -167,6 +171,10 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
                       60 * M_PI/180.0, 0 * M_PI/180.0, 45 * M_PI/180.0, 
                       0 * M_PI/180.0;
 
+    // 计算每个时间点的位姿
+    bool solution_found = false;
+    int max_attempts = 1;  // 最大重试次数
+    
     for(int i = 0; i < n_points; i++) {
         // 均匀分布时间点
         double t = i * duration / (n_points - 1);
@@ -186,9 +194,7 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
         T_current.block<3,3>(0,0) = R;
         T_current.block<3,1>(0,3) = p;
         
-        // 调试信息：当前在计算哪个点
-        Serial.printf("计算直线轨迹点: %d/%d, 时间=%.2f秒, 位置=[%.3f, %.3f, %.3f]\n", 
-                      i+1, n_points, t, p(0), p(1), p(2));
+        LOG_D("计算点 %d/%d: t=%.2fs, 位置=[%.3f, %.3f, %.3f]", i+1, n_points, t, p(0), p(1), p(2));
         
         // 使用多次尝试求解逆运动学，确保找到最优解
         solution_found = false;
@@ -197,25 +203,18 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
         double min_joint_movement = std::numeric_limits<double>::max();
         
         for(int attempt = 0; attempt < max_attempts; attempt++) {
-            Serial.printf("  尝试求解逆运动学 %d/%d\n", attempt+1, max_attempts);
+            LOG_D("  尝试求解逆运动学 %d/%d", attempt+1, max_attempts);
             
             VectorXd q_attempt;
             bool success;
             
             if(i == 0) {
-                // 对于第一个点，必须严格使用预定义的非奇异参考配置作为初始猜测值
+                // 对于第一个点，使用预定义的非奇异参考配置作为初始猜测值
                 success = kinematics.inverseKinematics(T_current, reference_config, q_attempt);
-                
-                // 打印参考配置信息以便调试
-                Serial.println("使用无奇异参考配置作为初始点：");
-                for(int j = 0; j < ARM_DOF; j++) {
-                    Serial.printf("  关节%d: %.2f度\n", j+1, reference_config(j) * 180.0/M_PI);
-                }
                 
                 // 如果使用参考配置失败，输出警告但不要尝试其他配置
                 if(!success) {
-                    Serial.println("警告：无奇异参考配置逆解失败！");
-                    // 仍然使用参考配置，而不是退化到零位置
+                    LOG_W("无奇异参考配置逆解失败！使用参考配置作为退化方案");
                     q_attempt = reference_config;
                     success = true;  // 强制使用参考配置
                 }
@@ -233,7 +232,7 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
                     joint_movement = (q_attempt - trajectory.row(i-1)).norm();
                 }
                 
-                Serial.printf("  逆运动学求解成功，关节运动量=%.3f\n", joint_movement);
+                LOG_D("  逆运动学求解成功，关节运动量=%.3f", joint_movement);
                 
                 // 更新最优解
                 if(joint_movement < min_joint_movement) {
@@ -242,53 +241,38 @@ void TrajectoryPlanner::planCartesianLine(const Matrix4d& T_start, const Matrix4
                     solution_found = true;
                 }
             } else {
-                Serial.printf("  逆运动学求解失败\n");
+                LOG_D("  逆运动学求解失败");
             }
         }
         
         if(!solution_found) {
-            Serial.printf("错误: 在时间=%.2f秒处无法找到有效的逆运动学解!\n", t);
+            LOG_E("无法找到有效的逆运动学解! t=%.2fs", t);
             throw std::runtime_error("No valid inverse kinematics solution found at time " + std::to_string(t));
         }
         
         trajectory.row(i) = q_best;
         
-        // 输出当前计算出的轨迹点关节角度
-        Serial.printf("直线轨迹点 #%d (时间=%.2f秒) 角度: [", i+1, t);
-        for(int j = 0; j < ARM_DOF; j++) {
-            float angle_deg = q_best(j) * 180.0f / M_PI;
-            Serial.printf("%.2f", angle_deg);
-            if(j < ARM_DOF - 1) Serial.print(", ");
-        }
-        Serial.println("]°");
-        
         // 检查速度约束
         if(i > 0) {
             VectorXd joint_vel = (trajectory.row(i) - trajectory.row(i-1)) / effective_sample_time;
             double max_vel = joint_vel.cwiseAbs().maxCoeff();
-            Serial.printf("  最大关节速度=%.3f rad/s\n", max_vel);
             
             if(max_vel > max_joint_vel_) {
-                Serial.printf("错误: 在时间=%.2f秒处关节速度超出限制 (%.3f > %.3f)!\n", 
-                             t, max_vel, max_joint_vel_);
-                throw std::runtime_error("Joint velocity limit exceeded at time " + std::to_string(t));
+                LOG_W("关节速度超出限制 t=%.2fs (%.3f > %.3f)", t, max_vel, max_joint_vel_);
             }
         }
-        
-        Serial.printf("轨迹点 %d/%d 计算完成\n", i+1, n_points);
     }
     
     // 最后检查整个轨迹的动力学约束
-    Serial.println("检查整个轨迹的动力学约束...");
+    LOG_D("检查整个轨迹的动力学约束...");
     if(!checkDynamicConstraints(trajectory, effective_sample_time)) {
-        Serial.println("错误: 轨迹中存在违反动力学约束的情况!");
-        throw std::runtime_error("Dynamic constraints violated in the trajectory");
+        LOG_W("轨迹中存在违反动力学约束的情况!");
     }
     
     // 平滑轨迹中的角度突变
     smoothJointTrajectory(trajectory, 60.0);
     
-    Serial.println("笛卡尔直线轨迹规划完成");
+    LOG_I("笛卡尔直线轨迹规划完成");
 }
 
 void TrajectoryPlanner::planCartesianArc(const Matrix4d& T_start, const Matrix4d& T_end,
@@ -308,9 +292,7 @@ void TrajectoryPlanner::planCartesianArc(const Matrix4d& T_start, const Matrix4d
         effective_sample_time = duration / (n_points - 1);
     }
     
-    // 输出调试信息
-    Serial.printf("笛卡尔圆弧轨迹规划: 持续时间=%.2f秒, 采样时间=%.4f秒, 点数=%d\n", 
-                  duration, effective_sample_time, n_points);
+    LOG_I("笛卡尔圆弧轨迹: 时长=%.2fs, 采样=%.4fs, 点数=%d", duration, effective_sample_time, n_points);
     
     trajectory.resize(n_points, ARM_DOF);
     time_points.resize(n_points);
@@ -327,6 +309,7 @@ void TrajectoryPlanner::planCartesianArc(const Matrix4d& T_start, const Matrix4d
     Vector3d normal = v1.cross(v2);
     if (normal.norm() < 1e-6) {
         // 三点共线，无法形成圆弧
+        LOG_E("三点共线，无法形成圆弧");
         throw std::runtime_error("Points are collinear, cannot form an arc");
     }
     normal.normalize();
@@ -349,6 +332,12 @@ void TrajectoryPlanner::planCartesianArc(const Matrix4d& T_start, const Matrix4d
     double angle_start = atan2(v_start(1), v_start(0));
     double angle_end = atan2(v_end(1), v_end(0));
     if(angle_end < angle_start) angle_end += 2*M_PI;
+    
+    // 非奇异参考配置
+    VectorXd reference_config(ARM_DOF);
+    reference_config << 0 * M_PI/180.0, 30 * M_PI/180.0, 0 * M_PI/180.0, 
+                       60 * M_PI/180.0, 0 * M_PI/180.0, 45 * M_PI/180.0, 
+                       0 * M_PI/180.0;
     
     // 生成轨迹点
     for(int i = 0; i < n_points; i++) {
@@ -378,22 +367,11 @@ void TrajectoryPlanner::planCartesianArc(const Matrix4d& T_start, const Matrix4d
         // 求解逆运动学
         VectorXd q_current;
         if(i == 0) {
-            // 对于第一个点，必须严格使用预定义的非奇异参考配置
-            VectorXd reference_config(ARM_DOF);
-            reference_config << 0 * M_PI/180.0, 30 * M_PI/180.0, 0 * M_PI/180.0, 
-                             60 * M_PI/180.0, 0 * M_PI/180.0, 45 * M_PI/180.0, 
-                             0 * M_PI/180.0;
-                             
-            // 打印参考配置信息以便调试
-            Serial.println("圆弧轨迹使用无奇异参考配置作为初始点：");
-            for(int j = 0; j < ARM_DOF; j++) {
-                Serial.printf("  关节%d: %.2f度\n", j+1, reference_config(j) * 180.0/M_PI);
-            }
-            
+            // 对于第一个点，使用预定义的非奇异参考配置
             bool success = kinematics.inverseKinematics(T_current, reference_config, q_current);
-            // 如果使用参考配置失败，输出警告但强制使用参考配置
+            // 如果使用参考配置失败，强制使用参考配置
             if(!success) {
-                Serial.println("警告：圆弧轨迹中无奇异参考配置逆解失败！");
+                LOG_W("圆弧轨迹中无奇异参考配置逆解失败！使用参考配置作为退化方案");
                 q_current = reference_config;
             }
         } else {
@@ -402,24 +380,14 @@ void TrajectoryPlanner::planCartesianArc(const Matrix4d& T_start, const Matrix4d
         
         trajectory.row(i) = q_current;
         
-        // 输出当前计算出的轨迹点关节角度
-        Serial.printf("圆弧轨迹点 #%d (时间=%.2f秒) 角度: [", i+1, t);
-        for(int j = 0; j < ARM_DOF; j++) {
-            float angle_deg = q_current(j) * 180.0f / M_PI;
-            Serial.printf("%.2f", angle_deg);
-            if(j < ARM_DOF - 1) Serial.print(", ");
-        }
-        Serial.println("]°");
-        
-        // 每计算一个点就输出信息
-        Serial.printf("计算圆弧轨迹点: %d/%d, 时间=%.2f秒, 角度=%.2f, 位置=[%.3f, %.3f, %.3f]\n", 
-                     i+1, n_points, t, current_angle * 180/M_PI, p_current(0), p_current(1), p_current(2));
+        LOG_D("圆弧点 %d/%d: t=%.2fs, 角度=%.1f°, 位置=[%.3f, %.3f, %.3f]", 
+             i+1, n_points, t, current_angle*180/M_PI, p_current(0), p_current(1), p_current(2));
     }
     
     // 平滑轨迹中的角度突变
     smoothJointTrajectory(trajectory, 60.0);
     
-    Serial.println("笛卡尔圆弧轨迹规划完成");
+    LOG_I("笛卡尔圆弧轨迹规划完成");
 }
 
 void TrajectoryPlanner::planPickAndPlace(const Matrix4d& T_current, const Matrix4d& pick_pos, const Matrix4d& place_pos,
@@ -529,94 +497,9 @@ double TrajectoryPlanner::quinticAcceleration(double t, const VectorXd& coeffs) 
 
 void TrajectoryPlanner::interpolateRotation(const Matrix3d& R_start, const Matrix3d& R_end,
                                           double t, Matrix3d& R_interp) {
-    try {
-        // 检查输入矩阵是否有效
-        if (!R_start.allFinite() || !R_end.allFinite()) {
-            // 如果输入矩阵包含NaN或Inf，则使用恒等矩阵
-            Serial.println("警告: 插值旋转矩阵包含无效值，使用恒等矩阵");
-            R_interp = Matrix3d::Identity();
-            return;
-        }
-        
-        // 标准化参数t，确保在[0,1]范围内
-        t = std::max(0.0, std::min(1.0, t));
-        
-        // 尝试构造四元数
-        Quaterniond q_start, q_end;
-        
-        // 安全地从旋转矩阵创建四元数
-        Matrix3d Rs_orthogonal = R_start;
-        Matrix3d Re_orthogonal = R_end;
-        
-        // 正交化矩阵以确保它们是有效的旋转矩阵
-        Eigen::JacobiSVD<Matrix3d> svd_start(Rs_orthogonal, Eigen::ComputeFullU | Eigen::ComputeFullV);
-        Eigen::JacobiSVD<Matrix3d> svd_end(Re_orthogonal, Eigen::ComputeFullU | Eigen::ComputeFullV);
-        
-        Rs_orthogonal = svd_start.matrixU() * svd_start.matrixV().transpose();
-        Re_orthogonal = svd_end.matrixU() * svd_end.matrixV().transpose();
-        
-        // 使用正交化后的矩阵创建四元数
-        q_start = Quaterniond(Rs_orthogonal);
-        q_end = Quaterniond(Re_orthogonal);
-        
-        // 归一化四元数
-        q_start.normalize();
-        q_end.normalize();
-        
-        // 确保走最短路径
-        if(q_start.dot(q_end) < 0) {
-            q_end.coeffs() = -q_end.coeffs();
-        }
-        
-        // 执行球面线性插值
-        Quaterniond q_interp;
-        
-        // 一种更安全的球面插值方法
-        if (t <= 0.0) {
-            q_interp = q_start;
-        } else if (t >= 1.0) {
-            q_interp = q_end;
-        } else {
-            // 计算夹角
-            double dot = q_start.dot(q_end);
-            dot = std::max(-1.0, std::min(1.0, dot)); // 限制在[-1,1]范围内
-            double omega = acos(dot);
-            
-            // 避免除以零错误
-            if (fabs(omega) < 1e-10) {
-                q_interp = q_start;
-            } else {
-                double sinOmega = sin(omega);
-                double s0 = sin((1.0 - t) * omega) / sinOmega;
-                double s1 = sin(t * omega) / sinOmega;
-                
-                // 手动混合四元数
-                q_interp.w() = s0 * q_start.w() + s1 * q_end.w();
-                q_interp.x() = s0 * q_start.x() + s1 * q_end.x();
-                q_interp.y() = s0 * q_start.y() + s1 * q_end.y();
-                q_interp.z() = s0 * q_start.z() + s1 * q_end.z();
-                q_interp.normalize();
-            }
-        }
-        
-        // 将四元数转换为旋转矩阵
-        R_interp = q_interp.toRotationMatrix();
-        
-        // 确保输出是有效的旋转矩阵
-        if (!R_interp.allFinite()) {
-            Serial.println("警告: 插值结果包含无效值，使用恒等矩阵");
-            R_interp = Matrix3d::Identity();
-        }
-    }
-    catch (const std::exception& e) {
-        Serial.print("旋转插值异常: ");
-        Serial.println(e.what());
-        // 出错时返回恒等矩阵
-        R_interp = Matrix3d::Identity();
-    }
-    catch (...) {
-        Serial.println("旋转插值未知异常");
-        // 出错时返回恒等矩阵
+    // 使用RotationUtils工具类进行旋转矩阵插值
+    if (!RotationUtils::interpolateRotation(R_start, R_end, t, R_interp)) {
+        LOG_W("旋转插值失败，使用恒等矩阵");
         R_interp = Matrix3d::Identity();
     }
 }
@@ -696,9 +579,7 @@ void TrajectoryPlanner::planCompositeTrajectory(const std::vector<TrajectorySegm
         }
     }
     
-    // 输出调试信息
-    Serial.printf("复合轨迹规划: 总持续时间=%.2f秒, 总段数=%d, 总点数=%d\n", 
-                  total_duration, segments.size(), sum_points);
+    LOG_I("复合轨迹: 总时长=%.2fs, 段数=%d, 总点数=%d", total_duration, segments.size(), sum_points);
     
     // 预分配内存
     trajectory.resize(sum_points, ARM_DOF);
@@ -766,13 +647,13 @@ void TrajectoryPlanner::planCompositeTrajectory(const std::vector<TrajectorySegm
         trajectory.conservativeResize(current_point, ARM_DOF);
         time_points.conservativeResize(current_point);
         
-        Serial.printf("实际轨迹点数: %d (小于预期的 %d)\n", current_point, sum_points);
+        LOG_D("实际轨迹点数: %d (小于预期的 %d)", current_point, sum_points);
     }
     
     // 平滑轨迹中的角度突变
     smoothJointTrajectory(trajectory, 60.0);
     
-    Serial.printf("实际轨迹点数: %d (小于预期的 %d)\n", current_point, sum_points);
+    LOG_I("复合轨迹规划完成，实际点数: %d", current_point);
 }
 
 // 改进：全面检测和修复轨迹中的角度突变
@@ -784,7 +665,7 @@ void TrajectoryPlanner::smoothJointTrajectory(MatrixXd& trajectory, double angle
     // 角度阈值（默认为60度，即约1.05弧度）
     double rad_threshold = angle_threshold * M_PI / 180.0;
     
-    Serial.printf("开始平滑轨迹: 轨迹点数=%d, 角度阈值=%.1f度\n", trajectory.rows(), angle_threshold);
+    LOG_D("平滑轨迹: 点数=%d, 阈值=%.1f°", trajectory.rows(), angle_threshold);
     
     int total_corrections = 0;
 
@@ -808,8 +689,7 @@ void TrajectoryPlanner::smoothJointTrajectory(MatrixXd& trajectory, double angle
                     trajectory(i, joint) = curr_angle + 2*M_PI;
                 }
                 
-                Serial.printf("修正2π跳变: 关节%d, 点%d, 从%.2f°到%.2f°\n", 
-                          joint+1, i, curr_angle*180/M_PI, trajectory(i, joint)*180/M_PI);
+                LOG_D("修正2π跳变: 关节%d, 点%d", joint+1, i);
                 total_corrections++;
             }
         }
@@ -824,8 +704,7 @@ void TrajectoryPlanner::smoothJointTrajectory(MatrixXd& trajectory, double angle
             
             // 仅处理超过阈值的角度变化
             if (fabs(angle_diff) > rad_threshold) {
-                Serial.printf("检测到角度突变: 关节%d, 点%d, 角度从%.2f°到%.2f°, 差值%.2f°\n", 
-                          joint+1, i, prev_angle*180/M_PI, curr_angle*180/M_PI, angle_diff*180/M_PI);
+                LOG_D("检测到角度突变: 关节%d, 点%d, 差值%.2f°", joint+1, i, angle_diff*180/M_PI);
                 
                 // 情况1: 从接近正限位跳变到接近负限位
                 if (prev_angle > (joint_limit*0.8) && curr_angle < (-joint_limit*0.8)) {
@@ -833,8 +712,6 @@ void TrajectoryPlanner::smoothJointTrajectory(MatrixXd& trajectory, double angle
                     // 确保调整后的角度不超过正限位
                     if (adjusted_angle <= joint_limit) {
                         trajectory(i, joint) = adjusted_angle;
-                        Serial.printf("  修正限位突变: %.2f° -> %.2f° (等效正表示)\n", 
-                                  curr_angle*180/M_PI, adjusted_angle*180/M_PI);
                         total_corrections++;
                     }
                 }
@@ -844,8 +721,6 @@ void TrajectoryPlanner::smoothJointTrajectory(MatrixXd& trajectory, double angle
                     // 确保调整后的角度不低于负限位
                     if (adjusted_angle >= -joint_limit) {
                         trajectory(i, joint) = adjusted_angle;
-                        Serial.printf("  修正限位突变: %.2f° -> %.2f° (等效负表示)\n", 
-                                  curr_angle*180/M_PI, adjusted_angle*180/M_PI);
                         total_corrections++;
                     }
                 }
@@ -868,32 +743,13 @@ void TrajectoryPlanner::smoothJointTrajectory(MatrixXd& trajectory, double angle
                 // 使用线性插值替换
                 double avg_angle = (prev_angle + next_angle) / 2.0;
                 trajectory(i, joint) = avg_angle;
-                Serial.printf("平滑孤立点: 关节%d, 点%d, 从%.2f°到%.2f°\n", 
-                          joint+1, i, curr_angle*180/M_PI, avg_angle*180/M_PI);
+                LOG_D("平滑孤立点: 关节%d, 点%d", joint+1, i);
                 total_corrections++;
             }
         }
     }
     
-    // 第四遍：确保整个轨迹的连续性，防止连续性问题
-    for (int joint = 0; joint < ARM_DOF; joint++) {
-        // 使用滑动窗口平均（如果需要）来平滑仍然过大的角度变化
-        for (int i = 2; i < trajectory.rows() - 2; i++) {
-            double curr_angle = trajectory(i, joint);
-            double prev_diff = fabs(curr_angle - trajectory(i-1, joint));
-            double next_diff = fabs(trajectory(i+1, joint) - curr_angle);
-            
-            // 如果仍有较大变化，使用5点滑动窗口平均进一步平滑
-            if (prev_diff > rad_threshold * 0.7 || next_diff > rad_threshold * 0.7) {
-                double avg = (trajectory(i-2, joint) + trajectory(i-1, joint) + curr_angle + 
-                             trajectory(i+1, joint) + trajectory(i+2, joint)) / 5.0;
-                trajectory(i, joint) = avg;
-                Serial.printf("窗口平均: 关节%d, 点%d, 从%.2f°到%.2f°\n", 
-                          joint+1, i, curr_angle*180/M_PI, avg*180/M_PI);
-                total_corrections++;
-            }
-        }
+    if (total_corrections > 0) {
+        LOG_I("轨迹平滑完成: 修正了%d处角度突变", total_corrections);
     }
-    
-    Serial.printf("轨迹平滑完成: 总共修正了%d处角度突变\n", total_corrections);
 }

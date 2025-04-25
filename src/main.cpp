@@ -11,10 +11,10 @@ void setup() {
   Serial.begin(115200);  // USB-CDC串口，用于调试
   Serial.println("\n\n=========初始化开始=========");
 
-    // // 关闭任务看门狗(Task Watchdog)
-    // disableCore0WDT();
-    // disableCore1WDT();
-    // disableLoopWDT();
+  // 关闭任务看门狗(Task Watchdog)
+  disableCore0WDT();
+  disableCore1WDT();
+  disableLoopWDT();
   
   // 初始化舵机
   initServo();

@@ -22,6 +22,9 @@ volatile bool isTrajectoryRunning = false;
 // 全局轨迹执行器
 TrajectoryExecutor* trajectoryExecutor = nullptr;
 
+// 看门狗宏定义
+#define FEED_WDT() esp_task_wdt_reset()
+
 // 网络服务任务
 void networkTask(void *parameter) {
   // 连接WiFi
@@ -209,9 +212,15 @@ void trajectoryCalculationTask(void *parameter) {
     // 初始化工作标志
     bool isWorking = false;
     
+    // 注释掉手动初始化看门狗，因为在main.cpp中已经禁用系统看门狗
+    // esp_task_wdt_init(10, true);  // 10秒超时，允许重置
+    // esp_task_wdt_add(NULL);       // 将当前任务添加到看门狗
     Serial.println("轨迹计算任务已启动");
     
     while(1) {
+        // 重置看门狗
+        FEED_WDT();
+        
         // 等待计算命令
         TrajectoryCommand cmd;
         
@@ -223,6 +232,7 @@ void trajectoryCalculationTask(void *parameter) {
             
             // 输出进度
             Serial.println("进度: 准备运动 0%");
+            FEED_WDT(); // 喂狗
             
             // 获取轨迹执行器
             if(trajectoryExecutor == nullptr) {
@@ -244,6 +254,7 @@ void trajectoryCalculationTask(void *parameter) {
             Serial.println("在轨迹规划前，先将机械臂移动到无奇异初始位置");
             trajectoryExecutor->moveToSafePose();
             Serial.println("机械臂已到达安全初始位置，开始轨迹计算");
+            FEED_WDT(); // 喂狗
             
             MatrixXd trajectory;
             VectorXd timePoints;
@@ -263,6 +274,7 @@ void trajectoryCalculationTask(void *parameter) {
             
             // 输出进度
             Serial.println("进度: 获取当前姿态 20%");
+            FEED_WDT(); // 喂狗
             
             // 计算当前位置的正向运动学
             Matrix4d current_pose;
@@ -281,6 +293,7 @@ void trajectoryCalculationTask(void *parameter) {
             
             // 输出进度
             Serial.println("进度: 运动学分析 30%");
+            FEED_WDT(); // 喂狗
             
             // 输出内存状态
             Serial.printf("内存状态: 空闲堆: %d 字节\n", xPortGetFreeHeapSize());
@@ -293,8 +306,10 @@ void trajectoryCalculationTask(void *parameter) {
             
             if(cmd.type == TrajectoryCommandType::JOINT_SPACE) {
                 // 计算关节空间轨迹
+                FEED_WDT(); // 喂狗
                 planner.planJointTrajectory(current_q, cmd.jointAngles, 
                                           cmd.duration, trajectory, timePoints);
+                FEED_WDT(); // 喂狗
                 success = (trajectory.rows() > 0);
             }
             else if(cmd.type == TrajectoryCommandType::LINE) {
@@ -306,6 +321,8 @@ void trajectoryCalculationTask(void *parameter) {
                 double pitch = cmd.orientation(1);
                 double yaw = cmd.orientation(2);
                 
+                FEED_WDT(); // 在计算三角函数前喂狗
+                
                 Matrix3d rotation = Matrix3d::Identity();
                 double cr = cos(roll), sr = sin(roll);
                 double cp = cos(pitch), sp = sin(pitch);
@@ -319,10 +336,13 @@ void trajectoryCalculationTask(void *parameter) {
                 target_pose.block<3,3>(0,0) = rotation;
                 target_pose.block<3,1>(0,3) = cmd.position;
                 
+                FEED_WDT(); // 在计算直线轨迹前喂狗
+                
                 // 计算直线轨迹
                 planner.planCartesianLine(current_pose, target_pose, 
                                          cmd.duration, kinematics,
                                          trajectory, timePoints);
+                FEED_WDT(); // 喂狗
                 success = (trajectory.rows() > 0);
             }
             else if(cmd.type == TrajectoryCommandType::ARC) {
@@ -334,6 +354,8 @@ void trajectoryCalculationTask(void *parameter) {
                 double pitch = cmd.orientation(1);
                 double yaw = cmd.orientation(2);
                 
+                FEED_WDT(); // 在计算三角函数前喂狗
+                
                 Matrix3d rotation = Matrix3d::Identity();
                 double cr = cos(roll), sr = sin(roll);
                 double cp = cos(pitch), sp = sin(pitch);
@@ -347,10 +369,13 @@ void trajectoryCalculationTask(void *parameter) {
                 target_pose.block<3,3>(0,0) = rotation;
                 target_pose.block<3,1>(0,3) = cmd.position;
                 
+                FEED_WDT(); // 在计算圆弧轨迹前喂狗
+                
                 // 计算圆弧轨迹
                 planner.planCartesianArc(current_pose, target_pose, 
                                         cmd.viaPoint, cmd.duration, kinematics,
                                         trajectory, timePoints);
+                FEED_WDT(); // 喂狗
                 success = (trajectory.rows() > 0);
             }
             else if(cmd.type == TrajectoryCommandType::PICK_PLACE) {
@@ -365,6 +390,8 @@ void trajectoryCalculationTask(void *parameter) {
                 Serial.printf("放置位置: [%.3f, %.3f, %.3f]\n", 
                              cmd.viaPoint(0), cmd.viaPoint(1), cmd.viaPoint(2));
                 Serial.printf("抬升高度: %.3f 米\n", cmd.liftHeight);
+                
+                FEED_WDT(); // 在计算旋转矩阵前喂狗
                 
                 // 创建拾取位姿矩阵
                 Matrix4d pick_pose = Matrix4d::Identity();
@@ -397,10 +424,13 @@ void trajectoryCalculationTask(void *parameter) {
                 // 再输出进度
                 Serial.println("进度: 计算拾放轨迹 50% (点数: 0/50)");
                 
+                FEED_WDT(); // 在计算拾放轨迹前喂狗
+                
                 // 计算拾放轨迹
                 planner.planPickAndPlace(current_pose, pick_pose, place_pose,
                                         cmd.liftHeight, cmd.duration, kinematics,
                                         trajectory, timePoints);
+                FEED_WDT(); // 喂狗
                 success = (trajectory.rows() > 0);
             }
             
@@ -419,6 +449,11 @@ void trajectoryCalculationTask(void *parameter) {
                         isValid = false;
                         break;
                     }
+                    
+                    // 每检查10个点喂一次狗
+                    if(i % 10 == 0) {
+                        FEED_WDT(); // 喂狗
+                    }
                 }
                 success = isValid;
                 
@@ -435,6 +470,8 @@ void trajectoryCalculationTask(void *parameter) {
                 // 更新进度
                 Serial.println("进度: 设置轨迹 90% (点数: " + 
                              String(trajectory.rows()) + "/" + String(trajectory.rows()) + ")");
+                
+                FEED_WDT(); // 喂狗
                 
                 // 重要修改：强制输出轨迹调试信息
                 Serial.println("轨迹点信息:");
@@ -459,9 +496,12 @@ void trajectoryCalculationTask(void *parameter) {
                     // 短暂延时确保记录完成
                     if(i % 10 == 0) { // 每10个点延时一次，避免频繁延时
                         vTaskDelay(pdMS_TO_TICKS(1));
+                        FEED_WDT(); // 喂狗
                     }
                 }
                 Serial.printf("[TRAJ_CALC] 已记录 %d 个轨迹点\n", trajectory.rows());
+                
+                FEED_WDT(); // 喂狗
                 
                 // 将轨迹设置到执行器
                 if(!trajectoryExecutor->setTrajectory(trajectory, timePoints)) {

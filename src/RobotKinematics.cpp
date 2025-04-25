@@ -1,6 +1,10 @@
 #include "RobotKinematics.h"
 #include <cmath>
 #include <Arduino.h> // 添加Arduino头文件以支持Serial对象
+#include "esp_task_wdt.h" // 添加ESP32任务看门狗头文件
+
+// 看门狗重置宏定义
+#define FEED_WDT() esp_task_wdt_reset()
 
 RobotKinematics::RobotKinematics() {
     // 初始化向量
@@ -82,6 +86,10 @@ bool RobotKinematics::inverseKinematics(const Matrix4d& T_des, const VectorXd& q
     VectorXd error(6);         // 位置和姿态误差
     Matrix4d T_current;        // 当前位姿矩阵
     double damping = DAMPING;  // 使用头文件中定义的阻尼因子
+    double last_error = std::numeric_limits<double>::max(); // 添加last_error变量
+    
+    // 喂看门狗
+    FEED_WDT();
     
     // 输出目标位姿信息以便调试
     Vector3d target_pos = T_des.block<3,1>(0,3);
@@ -94,177 +102,169 @@ bool RobotKinematics::inverseKinematics(const Matrix4d& T_des, const VectorXd& q
     VectorXd best_q = q0;
     int stalled_count = 0;  // 用于记录连续误差改善不明显的次数
     
-    // 早期终止标志
-    bool early_stop = false;
-    
     // 尝试多个随机初值
-    for (int attempt = 0; attempt < 1; attempt++) {  // 仅对初始点进行计算，外部已有多次尝试机制
-        double last_error = std::numeric_limits<double>::max();
+    for(int iter = 0; iter < max_iter; iter++) {
+        // 每10次迭代喂一次看门狗
+        if(iter % 10 == 0) {
+            FEED_WDT();
+        }
         
-        for(int iter = 0; iter < max_iter; iter++) {
-            // 计算当前位姿
-            forwardKinematics(q, T_current);
+        // 计算当前位姿
+        forwardKinematics(q, T_current);
+        
+        // 计算误差 - 使用改进的误差计算方式
+        computeFullError(T_current, T_des, error);  // 使用更完整的误差度量
+        double error_norm = error.norm();
+        
+        // 记录最佳解
+        if(error_norm < min_error) {
+            min_error = error_norm;
+            best_q = q;
+            stalled_count = 0;  // 重置停滞计数
             
-            // 计算误差 - 使用改进的误差计算方式
-            computeFullError(T_current, T_des, error);  // 使用更完整的误差度量
-            double error_norm = error.norm();
-            
-            // 记录最佳解
-            if(error_norm < min_error) {
-                min_error = error_norm;
-                best_q = q;
-                stalled_count = 0;  // 重置停滞计数
-                
-                // 输出改进的解
-                if(iter > 0 && iter % 50 == 0) {
-                    Serial.printf("  迭代%d: 误差=%.6f\n", iter, min_error);
-                }
-            } else {
-                stalled_count++;  // 误差没有改善，增加停滞计数
+            // 输出改进的解
+            if(iter > 0 && iter % 50 == 0) {
+                Serial.printf("  迭代%d: 误差=%.6f\n", iter, min_error);
+                FEED_WDT(); // 每50次迭代额外喂一次狗
             }
+        } else {
+            stalled_count++;  // 误差没有改善，增加停滞计数
+        }
+        
+        // 检查收敛性 - 早期终止条件
+        if(error_norm < tol) {
+            Serial.printf("逆运动学收敛! 迭代次数=%d, 误差=%.6f\n", iter, error_norm);
+            q_result = q;
+            return true;
+        }
+        
+        // 如果连续15次迭代都没有改善，增加随机扰动
+        if (stalled_count > 15) {
+            FEED_WDT(); // 在扰动前喂狗
             
-            // 检查收敛性 - 早期终止条件
-            if(error_norm < tol) {
-                Serial.printf("逆运动学收敛! 迭代次数=%d, 误差=%.6f\n", iter, error_norm);
-                q_result = q;
-                return true;
-            }
+            // 尝试更有针对性的扰动 - 主要在难以收敛的方向上添加扰动
+            VectorXd perturb = VectorXd::Zero(ARM_DOF);
             
-            // 如果连续15次迭代都没有改善，增加随机扰动 (从30减少到15)
-            if (stalled_count > 15) {
-                // 尝试更有针对性的扰动 - 主要在难以收敛的方向上添加扰动
-                VectorXd perturb = VectorXd::Zero(ARM_DOF);
-                
-                // 找出贡献最小的关节方向
-                MatrixXd J_contrib = J.cwiseAbs();
-                VectorXd joint_contrib = J_contrib.colwise().sum();
-                int min_contrib_idx = 0;
-                double min_contrib = joint_contrib(0);
-                for (int i = 1; i < ARM_DOF; i++) {
-                    if (joint_contrib(i) < min_contrib) {
-                        min_contrib = joint_contrib(i);
-                        min_contrib_idx = i;
-                    }
-                }
-                
-                // 在贡献小的方向上添加较大扰动，其他方向小扰动
-                for (int i = 0; i < ARM_DOF; i++) {
-                    double scale = (i == min_contrib_idx) ? 0.1 : 0.03;
-                    perturb(i) = (double(rand()) / RAND_MAX - 0.5) * scale;
-                }
-                
-                q += perturb;
-                
-                // 应用关节限位
-                if(has_joint_limits_) {
-                    q = q.cwiseMax(joint_lower_limits_).cwiseMin(joint_upper_limits_);
-                }
-                
-                stalled_count = 0;
-                
-                // 如果进行了过多次扰动尝试，提前结束
-                if (iter > max_iter/2 && min_error > 0.1) {
-                    early_stop = true;
-                    break;
-                }
-                
-                continue;
-            }
-            
-            // 更有效率的雅可比计算策略
-            if (iter % 5 == 0) {
-                // 每5次迭代使用一次数值雅可比（更准确但计算量大）
-                getJacobianNumerical(q, T_des, J);
-            } else {
-                // 其他时候使用解析雅可比（更快）
-                getJacobian(q, J);
-            }
-            
-            // 检查雅可比矩阵有效性
-            if(!J.allFinite()) {
-                Serial.println("警告: 雅可比矩阵包含无效值");
-                q_result = best_q;
-                return min_error < 0.1; // 放宽容差
-            }
-            
-            // 计算DLS伪逆并进行额外优化
-            // 自适应阻尼 - 在误差大时使用大阻尼，误差小时减小阻尼
-            damping = DAMPING * (1.0 + 5.0 * std::min(1.0, error_norm));
-            
-            // 计算伪逆
-            pseudoInverse(J, J_pinv, damping);
-            
-            // 计算关节角度增量
-            VectorXd dq = -J_pinv * error;
-            
-            // 实现简化的线搜索 - 减少线搜索次数从10减至5
-            double alpha = 1.0;  // 初始步长
-            bool step_accepted = false;
-            Matrix4d T_new;
-            VectorXd q_new, error_new;
-            double current_error = error_norm;
-            
-            for (int ls = 0; ls < 5; ls++) {  // 最多5次线搜索尝试
-                q_new = q + alpha * dq;
-                
-                // 应用关节限位
-                if(has_joint_limits_) {
-                    q_new = q_new.cwiseMax(joint_lower_limits_).cwiseMin(joint_upper_limits_);
-                }
-                
-                // 计算新误差
-                forwardKinematics(q_new, T_new);
-                error_new.resize(6);
-                computeFullError(T_new, T_des, error_new);
-                double new_error = error_new.norm();
-                
-                if (new_error < current_error * 0.99) {  // 只接受显著改进
-                    // 接受这一步
-                    q = q_new;
-                    step_accepted = true;
-                    break;
-                }
-                
-                // 减小步长继续尝试
-                alpha *= 0.5;
-                
-                if (alpha < 1e-4) {  // 避免过小的步长
-                    break;
+            // 找出贡献最小的关节方向
+            MatrixXd J_contrib = J.cwiseAbs();
+            VectorXd joint_contrib = J_contrib.colwise().sum();
+            int min_contrib_idx = 0;
+            double min_contrib = joint_contrib(0);
+            for (int i = 1; i < ARM_DOF; i++) {
+                if (joint_contrib(i) < min_contrib) {
+                    min_contrib = joint_contrib(i);
+                    min_contrib_idx = i;
                 }
             }
             
-            // 如果线搜索失败，使用直接缩小的步长
-            if (!step_accepted) {
-                double fixed_alpha = 0.01;  // 固定小步长
-                q_new = q + fixed_alpha * dq;
-                
-                // 应用关节限位
-                if(has_joint_limits_) {
-                    q_new = q_new.cwiseMax(joint_lower_limits_).cwiseMin(joint_upper_limits_);
-                }
-                
+            // 在贡献小的方向上添加较大扰动，其他方向小扰动
+            for (int i = 0; i < ARM_DOF; i++) {
+                double scale = (i == min_contrib_idx) ? 0.1 : 0.03;
+                perturb(i) = (double(rand()) / RAND_MAX - 0.5) * scale;
+            }
+            
+            q += perturb;
+            
+            // 应用关节限位
+            if(has_joint_limits_) {
+                q = q.cwiseMax(joint_lower_limits_).cwiseMin(joint_upper_limits_);
+            }
+            
+            stalled_count = 0;
+            
+            continue;
+        }
+        
+        // 更有效率的雅可比计算策略
+        if (iter % 5 == 0) {
+            // 每5次迭代使用一次数值雅可比（更准确但计算量大）
+            getJacobianNumerical(q, T_des, J);
+            FEED_WDT(); // 数值雅可比计算后喂狗
+        } else {
+            // 其他时候使用解析雅可比（更快）
+            getJacobian(q, J);
+        }
+        
+        // 检查雅可比矩阵有效性
+        if(!J.allFinite()) {
+            Serial.println("警告: 雅可比矩阵包含无效值");
+            q_result = best_q;
+            return min_error < 0.1; // 放宽容差
+        }
+        
+        // 计算DLS伪逆并进行额外优化
+        // 自适应阻尼 - 在误差大时使用大阻尼，误差小时减小阻尼
+        damping = DAMPING * (1.0 + 5.0 * std::min(1.0, error_norm));
+        
+        // 计算伪逆
+        pseudoInverse(J, J_pinv, damping);
+        FEED_WDT(); // 伪逆计算后喂狗
+        
+        // 计算关节角度增量
+        VectorXd dq = -J_pinv * error;
+        
+        // 实现简化的线搜索 - 减少线搜索次数从10减至5
+        double alpha = 1.0;  // 初始步长
+        bool step_accepted = false;
+        Matrix4d T_new;
+        VectorXd q_new, error_new;
+        double current_error = error_norm;
+        
+        for (int ls = 0; ls < 5; ls++) {  // 最多5次线搜索尝试
+            q_new = q + alpha * dq;
+            
+            // 应用关节限位
+            if(has_joint_limits_) {
+                q_new = q_new.cwiseMax(joint_lower_limits_).cwiseMin(joint_upper_limits_);
+            }
+            
+            // 计算新误差
+            forwardKinematics(q_new, T_new);
+            error_new.resize(6);
+            computeFullError(T_new, T_des, error_new);
+            double new_error = error_new.norm();
+            
+            if (new_error < current_error * 0.99) {  // 只接受显著改进
+                // 接受这一步
                 q = q_new;
+                step_accepted = true;
+                break;
             }
             
-            // 每隔50次检查是否停滞
-            if (iter > 0 && iter % 50 == 0) {
-                if (fabs(last_error - error_norm) < 0.001) {
-                    // 误差几乎不变，跳出循环
-                    Serial.printf("  误差停滞, 提前结束: %.6f -> %.6f\n", last_error, error_norm);
-                    break;
-                }
-                last_error = error_norm;
-            }
+            // 减小步长继续尝试
+            alpha *= 0.5;
             
-            // 新增：如果达到了较好的解但仍未达到容差，提前结束
-            if (error_norm < 0.05 && iter > max_iter/4) {
-                Serial.printf("  达到较好解，提前结束: 误差=%.6f\n", error_norm);
+            if (alpha < 1e-4) {  // 避免过小的步长
                 break;
             }
         }
         
-        if (early_stop) {
-            Serial.println("多次扰动后仍难以收敛，提前结束");
+        // 如果线搜索失败，使用直接缩小的步长
+        if (!step_accepted) {
+            double fixed_alpha = 0.01;  // 固定小步长
+            q_new = q + fixed_alpha * dq;
+            
+            // 应用关节限位
+            if(has_joint_limits_) {
+                q_new = q_new.cwiseMax(joint_lower_limits_).cwiseMin(joint_upper_limits_);
+            }
+            
+            q = q_new;
+        }
+        
+        // 每隔50次检查是否停滞
+        if (iter > 0 && iter % 50 == 0) {
+            if (fabs(last_error - error_norm) < 0.001) {
+                // 误差几乎不变，跳出循环
+                Serial.printf("  误差停滞, 提前结束: %.6f -> %.6f\n", last_error, error_norm);
+                break;
+            }
+            last_error = error_norm;
+        }
+        
+        // 新增：如果达到了较好的解但仍未达到容差，提前结束
+        if (error_norm < 0.05 && iter > max_iter/4) {
+            Serial.printf("  达到较好解，提前结束: 误差=%.6f\n", error_norm);
             break;
         }
     }
@@ -274,7 +274,9 @@ bool RobotKinematics::inverseKinematics(const Matrix4d& T_des, const VectorXd& q
     
     // 输出最终结果
     Serial.printf("逆运动学最终: 误差=%.6f\n", min_error);
-                 
+    
+    FEED_WDT(); // 函数结束前喂狗
+    
     return min_error < 0.1;  // 接受稍大的误差，提高成功率
 }
 
